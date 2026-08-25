@@ -100,13 +100,11 @@ Item {
   // pan far enough to cross a tile boundary.
   Component.onCompleted: root.rebuild()
 
-  // Hardcoded, and not a settable property: nothing should be able to point this
-  // somewhere else, and a style name is not a setting anyone asked for.
-  readonly property string tileStyle: "dark_all"
-
+  // The URL builder lives in GeoMath, beside the tile maths it validates against
+  // and inside the two check suites. See GeoMath.tileUrl for why the numbers are
+  // re-derived there rather than trusted from here.
   function tileUrl(z, x, y) {
-    return "https://basemaps.cartocdn.com/" + root.tileStyle
-         + "/" + z + "/" + x + "/" + y + ".png"
+    return GeoMath.tileUrl(z, x, y)
   }
 
   function noteFailure() {
@@ -133,6 +131,17 @@ Item {
       height: root.frame ? root.frame.px : 0
 
       source: root.tileUrl(modelData.z, modelData.x, modelData.y)
+
+      // Bound the DECODE, not just the transfer.
+      //
+      // A tile is nominally 256x256 and nothing enforces that but the server.
+      // A few-KB PNG can declare 50,000 x 50,000 pixels and cost gigabytes to
+      // decompress, and this decode happens inside the shared shell process.
+      // sourceSize is the ceiling the decoder is told up front; 512 is twice a
+      // real tile, so it never limits one, and it caps a bomb at a quarter of a
+      // megapixel.
+      sourceSize.width: 512
+      sourceSize.height: 512
 
       // Qt's pixmap cache keys on the URL, and a tile at a given z/x/y is the
       // same bytes forever, so panning back over ground already seen costs

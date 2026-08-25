@@ -99,3 +99,26 @@ function licenceText(value) {
   text = text.replace(/^\s+|\s+$/g, "")
   return text.length > 40 ? text.substring(0, 40) : text
 }
+
+
+// A local file path on its way to Image.source, or "" if it is not one.
+//
+// `source:` is a URL sink that resolves whatever it is given: `file://`,
+// `image://` and a bare absolute path all fetch, and `image://` reaches QML image
+// providers inside the shell. Panel.qml already checks that a photo path came out
+// of its own download script and sits inside the private cache directory; this is
+// the second check, at the sink, because a sink should not depend on a caller
+// elsewhere in the repo continuing to be careful.
+//
+// Absolute, no scheme of its own, no traversal, no control characters, and a
+// length no real path has. Anything else is "", and an Image with an empty source
+// fetches nothing.
+function localFileUrl(value) {
+  var path = String(value === undefined || value === null ? "" : value)
+  if (path === "" || path.length > 4096) return ""
+  if (path.charAt(0) !== "/") return ""
+  if (path.indexOf("://") >= 0) return ""
+  if (path.indexOf("..") >= 0) return ""
+  if (/[\u0000-\u001f\u007f]/.test(path)) return ""
+  return "file://" + path
+}
