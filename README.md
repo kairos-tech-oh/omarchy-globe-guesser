@@ -40,7 +40,7 @@ kept.
 ## Install
 
 ```sh
-omarchy plugin add https://github.com/kairos-tech-oh/omarchy-globe-gueser.git --enable
+omarchy plugin add https://github.com/kairos-tech-oh/omarchy-globe-guesser.git --enable
 ```
 
 Then add **Globe Guesser** to your bar from the Omarchy settings UI, under *Fun*.
