@@ -52,7 +52,20 @@ Item {
   property real centreLon: 0
 
   readonly property real minZoom: 1
-  readonly property real maxZoom: 40
+
+  // The two projections need wildly different ceilings, and the map's is
+  // derived rather than picked.
+  //
+  // `zoom` is a multiple of the world-fits-the-pane size, so the tile level it
+  // reaches is log2(paneSize * zoom / 256). The old flat ceiling of 40 sounds
+  // generous and is not: on a 330px-tall pane it tops out at tile level 6,
+  // which is country outlines. Street level is 17 or 18. Deriving the ceiling
+  // from the pyramid itself means it is right whatever size the pane ends up.
+  readonly property real maxZoom: {
+    if (root.mode === "globe") return 40
+    var pane = Math.max(1, Math.min(root.width, root.height))
+    return (GeoMath.TILE_SIZE * Math.pow(2, GeoMath.MAX_TILE_ZOOM)) / pane
+  }
 
   // The plain object GeoMath works in. Rebuilt whenever anything in it moves,
   // which is also exactly when the Canvas needs repainting.
@@ -117,8 +130,23 @@ Item {
     // aiming at slides away.
     var after = GeoMath.unproject(root.view, aroundX, aroundY)
     if (!after) return
-    root.centreLat = GeoMath.clamp(root.centreLat + (before.lat - after.lat), -89.9, 89.9)
-    root.centreLon = GeoMath.wrapLongitude(root.centreLon + (before.lon - after.lon))
+
+    if (root.mode === "globe") {
+      root.centreLat = GeoMath.clamp(root.centreLat + (before.lat - after.lat), -89.9, 89.9)
+      root.centreLon = GeoMath.wrapLongitude(root.centreLon + (before.lon - after.lon))
+      return
+    }
+
+    // On the map the correction is applied in world units, not in degrees, for
+    // the same reason panning is: a degree of latitude is worth a different
+    // number of pixels at every latitude on this projection, so correcting in
+    // degrees would leave the anchor drifting the further north you were.
+    root.centreLat = GeoMath.worldYToLat(GeoMath.clamp(
+        GeoMath.latToWorldY(root.centreLat)
+          + (GeoMath.latToWorldY(before.lat) - GeoMath.latToWorldY(after.lat)), 0, 1))
+    root.centreLon = GeoMath.worldXToLon(GeoMath.clamp(
+        GeoMath.lonToWorldX(root.centreLon)
+          + (GeoMath.lonToWorldX(before.lon) - GeoMath.lonToWorldX(after.lon)), 0, 1))
   }
 
   onModeChanged: {
@@ -134,8 +162,27 @@ Item {
 
   // ---------------------------------------------------------------- the land
 
+  // OpenStreetMap tiles, on the flat map only. The globe cannot use them: tiles
+  // are cut to Mercator and there is no way to drape a Mercator raster onto an
+  // orthographic sphere without resampling every one of them per frame.
+  TileLayer {
+    id: tiles
+    anchors.fill: parent
+    clip: true
+    // active, not merely visible: an invisible Image still loads, so leaving
+    // the bindings live in globe mode would fetch tiles for every frame of a
+    // spin and draw none of them.
+    active: root.mode === "map"
+    visible: root.mode === "map"
+    view: root.view
+  }
+
+  // The bundled outlines. In globe mode they are the map; in map mode they are
+  // what is left when the tiles cannot be reached, which is the whole reason
+  // this plugin still works on a machine that has been offline for a week.
   Canvas {
     id: outline
+    visible: root.mode === "globe" || !tiles.healthy
     anchors.fill: parent
 
     // Matches the shell's own charting: an image-backed immediate canvas keeps
@@ -345,6 +392,20 @@ Item {
     }
   }
 
+  // Required by both OpenStreetMap and CARTO, and shown wherever their tiles
+  // are: the data is free, the acknowledgement is the price.
+  Text {
+    anchors.right: parent.right
+    anchors.bottom: parent.bottom
+    anchors.margins: 4
+    visible: root.mode === "map" && tiles.healthy
+    text: "© OpenStreetMap contributors © CARTO"
+    textFormat: Text.PlainText
+    font.family: Style.font.family
+    font.pixelSize: Style.font.caption
+    color: Qt.rgba(root.landStroke.r, root.landStroke.g, root.landStroke.b, 0.55)
+  }
+
   // ---------------------------------------------------------------- pointing
 
   MouseArea {
@@ -395,13 +456,23 @@ Item {
         root.centreLon = GeoMath.wrapLongitude(root.centreLon - dx * perPixel)
         root.centreLat = GeoMath.clamp(root.centreLat + dy * perPixel, -89.9, 89.9)
       } else {
-        // Asked of GeoMath rather than recomputed here: two copies of the
-        // same formula is how panning ends up moving at a different rate from
-        // the projection that drew the map.
-        var scale = GeoMath.mapScale(root.view)
-        if (scale <= 0) return
-        root.centreLon = GeoMath.wrapLongitude(root.centreLon - dx / scale)
-        root.centreLat = GeoMath.clamp(root.centreLat + dy / scale, -89.9, 89.9)
+        // Panning happens in Mercator world units, not in degrees. Degrees per
+        // pixel is not a constant on this projection -- a pixel near the top of
+        // the map is worth several times as much latitude as one at the equator
+        // -- so moving the centre by dy/degreesPerPixel would drag the map at a
+        // different speed from the one it draws at, and the point under the
+        // cursor would slide away as you moved.
+        var size = GeoMath.mapWorldSize(root.view)
+        if (size <= 0) return
+        // Both axes clamped to the sheet, so panning stops at the edge of the
+        // world instead of sailing off into empty space and leaving the player
+        // to find their way back.
+        var worldX = GeoMath.clamp(
+            GeoMath.lonToWorldX(root.centreLon) - dx / size, 0, 1)
+        var worldY = GeoMath.clamp(
+            GeoMath.latToWorldY(root.centreLat) - dy / size, 0, 1)
+        root.centreLon = GeoMath.worldXToLon(worldX)
+        root.centreLat = GeoMath.worldYToLat(worldY)
       }
     }
 
@@ -430,7 +501,11 @@ Item {
     onWheel: function (wheel) {
       var steps = wheel.angleDelta.y / 120
       if (steps === 0) return
-      root.zoomBy(Math.pow(1.25, steps), wheel.x, wheel.y)
+      // Two notches per tile level on the map. At 1.25 per notch it took
+      // fifty-four of them to get from the whole world to a street, which is
+      // not zooming, it is grinding.
+      var factor = root.mode === "globe" ? 1.25 : Math.SQRT2
+      root.zoomBy(Math.pow(factor, steps), wheel.x, wheel.y)
     }
   }
 }

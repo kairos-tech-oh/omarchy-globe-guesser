@@ -5,14 +5,16 @@
   "version": "1.0.0",
   "author": "kairos",
   "license": "MIT",
-  "description": "Guess where in the world a photo was taken. Five rounds, a clickable world map and a spinnable globe, and photos from Wikimedia Commons. The map is bundled and works offline.",
-  "kinds": ["bar-widget"],
+  "description": "Guess where in the world a photo was taken. Five rounds, an OpenStreetMap map and a spinnable globe to click, and photographs of real places from Wikipedia. Falls back to a bundled offline map when there is no network.",
+  "kinds": [
+    "bar-widget"
+  ],
   "entryPoints": {
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
     "displayName": "Globe Guesser",
-    "description": "Guess where a photo was taken, on a map or a globe",
+    "description": "Guess where a photo was taken, on an OpenStreetMap map or a globe",
     "category": "Fun",
     "allowMultiple": false,
     "defaultSection": "right",
@@ -27,7 +29,11 @@
         "key": "difficulty",
         "type": "enum",
         "label": "Difficulty",
-        "options": ["easy", "normal", "hard"],
+        "options": [
+          "easy",
+          "normal",
+          "hard"
+        ],
         "defaultValue": "normal",
         "description": "Which cities a round can be drawn from. Easy uses the 150 largest in the world, normal the largest 500, hard all 1000 - including places you have very likely never heard of."
       },
@@ -45,7 +51,10 @@
         "key": "defaultView",
         "type": "enum",
         "label": "Starting view",
-        "options": ["map", "globe"],
+        "options": [
+          "map",
+          "globe"
+        ],
         "defaultValue": "map",
         "description": "Whether a round opens on the flat world map or the globe. You can switch at any time during a round; this only sets which one you start on."
       },
@@ -53,11 +62,11 @@
         "key": "searchRadiusKm",
         "type": "integer",
         "label": "Photo radius (km)",
-        "min": 5,
-        "max": 50,
-        "step": 5,
+        "min": 1,
+        "max": 10,
+        "step": 1,
         "defaultValue": 10,
-        "description": "How far from a city centre a photo may have been taken. Larger widens the pool and finds more countryside; smaller keeps photos recognisably in the city."
+        "description": "How far from a city centre a place may be. 10 km is both the default and MediaWiki's hard ceiling for a geosearch, so this only ever narrows the search. Smaller keeps photos in the city centre; it also finds fewer of them."
       }
     ]
   }

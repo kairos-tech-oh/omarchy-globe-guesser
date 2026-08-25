@@ -67,8 +67,15 @@ Panel {
   readonly property int roundsPerGame:
       Math.min(10, Math.max(3, parseInt(setting("roundsPerGame", 5), 10) || 5))
   readonly property string defaultView: setting("defaultView", "map") === "globe" ? "globe" : "map"
+  // MediaWiki's geosearch refuses a radius outside 10..10000 metres outright --
+  // "The value \"25000\" for parameter \"ggsradius\" must be between 10 and
+  // 10,000" -- so 10 km is a hard ceiling, not a preference. An earlier revision
+  // allowed up to 50 km here and widened a thin result to 25 km, which meant the
+  // widen retry could only ever spend a request on an error reply.
   readonly property int searchRadiusKm:
-      Math.min(50, Math.max(5, parseInt(setting("searchRadiusKm", 10), 10) || 10))
+      Math.min(10, Math.max(1, parseInt(setting("searchRadiusKm", 10), 10) || 10))
+
+  readonly property int maxRadiusMetres: 10000
 
   // ---------------------------------------------------------------- ceilings
   //
@@ -79,7 +86,14 @@ Panel {
   // `head -c`, because StdioCollector retains the whole of stdout before any
   // signal fires -- a check inside onStreamFinished is downstream of the
   // allocation it claims to prevent.
-  readonly property int metaCapBytes: 524288
+  // The place query is small: measured 12.9-21.1 KiB across nine cities at
+  // ggslimit=50, and roughly double that at 100. 256 KiB is more than five times
+  // the largest of those and is still a hard bound on what the shell can hold.
+  readonly property int wikiCapBytes: 262144
+
+  // One file's licence and author. A measured reply was 361 bytes.
+  readonly property int attrCapBytes: 32768
+
   readonly property int stateCapBytes: 65536
 
   // Both helper scripts emit a filesystem path on stdout. PATH_MAX is 4096, so
@@ -96,9 +110,13 @@ Panel {
   // is enforced by curl itself, before the bytes are written.
   readonly property int photoCapBytes: 6000000
 
-  // How many candidate photos are retained from one reply. gslimit is a request,
-  // not a guarantee, so the list is cut before QML holds it.
-  readonly property int maxCandidates: 40
+  // How many candidate photos are retained from one reply. ggslimit is a
+  // request, not a guarantee, so the list is cut before QML holds it.
+  //
+  // Raised from 40 with the move to article lead images: one larger reply that
+  // yields a usable photo first time is faster than three small ones that do
+  // not, and each reply is a fifth of the size it used to be anyway.
+  readonly property int maxCandidates: 60
 
   // The Wikimedia user-agent policy requires a request to identify the
   // application; a stock library User-Agent is explicitly not acceptable.
@@ -438,6 +456,11 @@ Panel {
             "sh", "-c", 'cap="$1"; shift; curl "$@" | head -c "$cap"', "sh",
             String(capBytes + 1),
             "-fsS", "--proto=https", "--max-time", String(innerSec),
+            // Wikimedia serves these replies gzipped, and the JSON compresses
+            // to roughly a fifth. curl inflates before writing to stdout, so
+            // `head -c` still bounds the *decompressed* stream -- the ceiling
+            // is not weakened by asking for compression, only the wire time is.
+            "--compressed",
             "-A", root.userAgent,
             "--", String(url)]
   }
@@ -454,38 +477,156 @@ Panel {
     return JSON.parse(text)
   }
 
-  function commonsUrl(latitude, longitude, radiusMetres) {
+  // Where a round comes from.
+  //
+  // This asks *English Wikipedia* for the ARTICLES near a point and their lead
+  // images -- not Commons for the FILES near a point, which is what an earlier
+  // revision did and what made the game unplayable.
+  //
+  // The difference is the whole fix for "that photo is not a place". Commons
+  // geosearch returns anything anyone ever tagged with a coordinate: a plate of
+  // food, a beetle, a gravestone, a museum exhibit, somebody's dog. None of
+  // those can be guessed from, because none of them look like anywhere.
+  // A Wikipedia article that *has* a coordinate is, almost by definition, a
+  // place -- a station, a bridge, a district, a park, a temple -- and its lead
+  // image is a photograph of that place, chosen by an editor to show what it
+  // looks like.
+  //
+  // Measured over nine cities it is also five to eight times smaller on the
+  // wire (12.9-21.1 KiB against 89-153 KiB) and finds far more usable photos:
+  // Reykjavik went from 3 to 37.
+  //
+  // colimit and pilimit are set to max deliberately. Both default to 10, so
+  // without them only the first ten articles come back with the coordinates and
+  // the thumbnail that make them usable at all -- which looks exactly like a
+  // sparse city and is impossible to tell apart from one.
+  function placesUrl(latitude, longitude, radiusMetres) {
     var query = [
       "action=query",
       "format=json",
       "formatversion=2",
       "generator=geosearch",
       "ggscoord=" + encodeURIComponent(latitude.toFixed(5) + "|" + longitude.toFixed(5)),
-      "ggsradius=" + String(Math.round(radiusMetres)),
-      "ggsnamespace=6",
-      "ggslimit=60",
-      "prop=coordinates|imageinfo",
-      "iiprop=url|size|mime|extmetadata",
-      "iiurlwidth=1280",
+      "ggsradius=" + String(root.clampRadius(radiusMetres)),
+      "ggslimit=100",
+      "prop=coordinates|pageimages",
+      "colimit=max",
+      "piprop=thumbnail|name",
+      "pithumbsize=1280",
+      "pilimit=max"
+    ]
+    return "https://en.wikipedia.org/w/api.php?" + query.join("&")
+  }
+
+  // 10..10000 metres, enforced here as well as at the setting, because the
+  // widen retry computes a radius rather than reading one.
+  function clampRadius(metres) {
+    var value = Math.round(Number(metres))
+    if (!isFinite(value)) return root.maxRadiusMetres
+    return Math.min(root.maxRadiusMetres, Math.max(10, value))
+  }
+
+  // Licence and author for one file, asked of Commons at reveal time.
+  //
+  // Wikipedia's pageimages gives a usable thumbnail URL but no licence, and
+  // these photographs are almost all CC-licensed, so the credit has to come from
+  // somewhere. Fetching it per round rather than per candidate turns what would
+  // have been a bulk query for sixty files into a 361-byte one for the single
+  // file actually shown -- and it happens while the player is looking at the
+  // answer, off the path that decides how fast the photo appears.
+  function attributionUrl(fileName) {
+    var query = [
+      "action=query",
+      "format=json",
+      "formatversion=2",
+      "titles=" + encodeURIComponent("File:" + fileName),
+      "prop=imageinfo",
+      "iiprop=extmetadata",
       "iiextmetadatafilter=LicenseShortName|Artist"
     ]
     return "https://commons.wikimedia.org/w/api.php?" + query.join("&")
   }
 
-  // Titles that are reliably not photographs of a place. Commons geosearch
-  // returns whatever is tagged with coordinates, which includes a great many
-  // maps, coats of arms and scanned documents; without this a round in three is
-  // a picture of a municipal crest.
-  readonly property var rejectTitle: /(\bmap\b|karte|carte|mapa|logo|coat.of.arms|wappen|escudo|\bflag\b|bandera|diagram|\bplan\b|\bchart\b|blazon|\bseal\b|banner|poster|\bscan\b|drawing|painting|\bsvg\b|1[0-8]\d\d)/i
+  // ------------------------------------------------------------ what counts
+  //
+  // Article lead images are already overwhelmingly photographs of places, so
+  // these are a second pass over a good source rather than a rescue of a bad
+  // one. Three filters and a score.
+
+  // Articles that carry a coordinate without being somewhere you could stand.
+  // Overwhelmingly events -- a battle, a siege, a terrorist attack -- which are
+  // pinned to where they happened and illustrated with a scroll painting or a
+  // memorial plaque. Also the meta-articles ("List of...", "History of...")
+  // and vehicles, which get a coordinate when they end up as a museum ship.
+  readonly property var rejectArticle: new RegExp(
+      "(rebellion|incident|\\bbattle\\b|\\bsiege\\b|\\bwar\\b|massacre|treaty"
+    + "|election|disaster|\\bcrash\\b|bombing|\\battack\\b|\\briot|scandal"
+    + "|murder|shooting|earthquake|\\bflood|explosion|derailment|hijack"
+    + "|protest|\\bstrike\\b|championship|olympic|world cup|tournament"
+    + "|^list of|^timeline of|^index of|^outline of|^history of|^culture of"
+    + "|^economy of|^demographics of|^politics of|^transport in|^education in"
+    + "|\\(disambiguation\\)|^(hms|uss|ss|mv|rms|hmas|hmcs) )", "i")
+
+  // Filenames that are not photographs of anywhere. Coats of arms, flags, logos
+  // and maps are what an administrative-division article uses when nobody has
+  // photographed the place; the rest are documents and artwork.
+  readonly property var rejectFile: new RegExp(
+      "(\\bmap\\b|karte|carte|mapa|logo|coat.of.arms|wappen|escudo|\\bflag\\b"
+    + "|bandera|blason|blazon|\\bseal\\b|emblem|\\bcrest\\b|\\bbadge\\b"
+    + "|diagram|\\bplan\\b|\\bchart\\b|banner|poster|\\bscan\\b|drawing"
+    + "|painting|portrait|\\bsvg\\b|screenshot|\\bicon\\b|placeholder"
+    + "|no.image|\\bcover\\b|1[0-8]\\d\\d)", "i")
+
+  // A close-up of a thing at a place is not a picture of the place. These do not
+  // reject outright -- a detail shot of a famous facade is still guessable --
+  // but they push a candidate below anything better in the same reply.
+  readonly property var closeUpWords: new RegExp(
+      "(interior|inside|\\bdetail|close.?up|macro|plaque|inscription|gravestone"
+    + "|\\btomb\\b|\\bgrave\\b|statue of|bust of|\\bsign\\b|signage|\\bmenu\\b"
+    + "|exhibit|artifact|artefact)", "i")
+
+  // What a guessable photograph tends to be of. Anything matching gets lifted
+  // above the rest of the same reply, which is what turns "a place" into "a
+  // place you can actually recognise something in".
+  readonly property var placeWords: new RegExp(
+      "(\\bview\\b|panorama|skyline|street|avenue|boulevard|\\broad\\b|square"
+    + "|plaza|piazza|bridge|castle|cathedral|church|temple|mosque|synagogue"
+    + "|station|\\bpark\\b|garden|harbou?r|\\bport\\b|market|tower|palace"
+    + "|monument|\\bcity\\b|\\btown\\b|village|district|quarter|beach|river"
+    + "|lake|mountain|valley|centre|center|\\bhall\\b|museum|stadium|airport"
+    + "|university|cityscape|aerial|waterfront|old.town)", "i")
 
   // The URL a photo may be downloaded from. Hardcoded host, hardcoded path
   // prefix, and a character set that leaves no room for a newline, a space or a
   // leading dash. This is the only gate between an API response and curl's argv.
+  //
+  // Every one of 254 thumbnails sampled across six cities was served from this
+  // host, including the ones Wikipedia hands back with utm_* query parameters
+  // appended -- which is why the character class has to admit ? & and =.
   readonly property var allowedPhotoUrl:
       /^https:\/\/upload\.wikimedia\.org\/wikipedia\/commons\/[A-Za-z0-9._~:\/?#\[\]@!$&'()*+,;=%-]{1,700}$/
 
+  // A Commons filename is about to be spliced into a URL query and handed to
+  // curl as argv. encodeURIComponent does the escaping and the value never
+  // reaches a shell, so the only things worth refusing here are a length no
+  // real filename has and the control characters -- a newline above all --
+  // that could forge structure inside the request.
+  //
+  // Deliberately NOT a shell-metacharacter blocklist. An earlier revision also
+  // refused quotes, ampersands and backticks, which sounds prudent and cost
+  // 6.6% of real filenames when measured against 333 of them: every one a
+  // legitimate French or Italian name -- Musee de l'homme, Pont de l'Alma,
+  // Sant'Andrea al Quirinale. Refusing characters that were never dangerous on
+  // this path silently deleted the best photographs in some of the best cities.
+  function safeFileName(value) {
+    var name = String(value === undefined || value === null ? "" : value)
+    if (name.length === 0 || name.length > 240) return ""
+    if (/[\u0000-\u001f\u007f]/.test(name)) return ""
+    return name
+  }
+
   function parseCandidates(raw) {
-    var parsed = root.parseCappedJson(raw, root.metaCapBytes)
+    var parsed = root.parseCappedJson(raw, root.wikiCapBytes)
     var pages = parsed && parsed.query && Array.isArray(parsed.query.pages)
         ? parsed.query.pages : []
 
@@ -494,39 +635,80 @@ Panel {
       var page = pages[i]
       if (!page || typeof page !== "object") continue
 
-      var info = Array.isArray(page.imageinfo) && page.imageinfo.length > 0 ? page.imageinfo[0] : null
-      var coords = Array.isArray(page.coordinates) && page.coordinates.length > 0 ? page.coordinates[0] : null
-      if (!info || !coords) continue
+      var thumb = page.thumbnail
+      var coords = Array.isArray(page.coordinates) && page.coordinates.length > 0
+          ? page.coordinates[0] : null
+      if (!thumb || !coords) continue
 
-      if (info.mime !== "image/jpeg" && info.mime !== "image/png") continue
-      if (Number(info.width) < 800 || Number(info.height) < 600) continue
+      var fileName = root.safeFileName(page.pageimage)
+      if (fileName === "") continue
 
-      var title = String(page.title || "")
-      if (root.rejectTitle.test(title)) continue
+      // The extension is checked on the FILE, not on the thumbnail URL.
+      // Wikimedia renders an SVG thumbnail as a PNG, so a coat of arms arrives
+      // with PNG magic bytes and sails through the download check -- 14 of 254
+      // sampled lead images were SVG, and every one was a crest or a logo.
+      if (!/\.(jpe?g|png)$/i.test(fileName)) continue
+
+      var articleTitle = String(page.title || "")
+      if (articleTitle === "") continue
+      if (root.rejectArticle.test(articleTitle)) continue
+      if (root.rejectFile.test(fileName)) continue
+
+      // The thumbnail is capped at 1280 wide, so a small one means the original
+      // was small -- usually a thumbnail-sized upload rather than a photograph.
+      var width = Number(thumb.width)
+      var height = Number(thumb.height)
+      if (!(width >= 640) || !(height >= 400)) continue
 
       var latitude = Number(coords.lat)
       var longitude = Number(coords.lon)
       if (!isFinite(latitude) || !isFinite(longitude)) continue
       if (Math.abs(latitude) > 90 || Math.abs(longitude) > 180) continue
 
-      var url = String(info.thumburl || info.url || "")
+      var url = String(thumb.source || "")
       if (!root.allowedPhotoUrl.test(url)) continue
 
-      var extra = info.extmetadata || {}
+      var haystack = articleTitle + " " + fileName
+      var score = 0
+      if (root.placeWords.test(haystack)) score += 2
+      if (root.closeUpWords.test(haystack)) score -= 3
+      // Landscape, and large. Both correlate with a photograph taken to show
+      // somewhere rather than to document an object.
+      if (width > height) score += 1
+      if (width >= 1000) score += 1
+
       out.push({
         lat: latitude,
         lon: longitude,
         url: url,
+        file: fileName,
+        score: score,
         // Sanitised as it enters, so nothing downstream -- including anything
-        // added later -- has to remember to do it. The Commons Artist field is
-        // literal HTML by design, so creditText unwraps tags to their text
-        // instead of deleting them outright.
-        title: Sanitise.titleText(title, 90),
-        credit: Sanitise.creditText(extra.Artist ? extra.Artist.value : "", 90),
-        licence: Sanitise.licenceText(extra.LicenseShortName ? extra.LicenseShortName.value : "")
+        // added later -- has to remember to do it.
+        title: Sanitise.plainOneLine(articleTitle, 90)
       })
     }
     return out
+  }
+
+  // Picks one candidate, preferring the most place-like.
+  //
+  // Not simply the highest score: taking the single best would make a city show
+  // the same photograph every time it came up, because the ranking is
+  // deterministic. Everything within one point of the best is eligible, and the
+  // choice among those is random -- so the game stays varied while still never
+  // reaching for the worst thing in the reply when it has a better option.
+  function chooseCandidate(candidates) {
+    var best = -Infinity
+    var i
+    for (i = 0; i < candidates.length; i++)
+      if (candidates[i].score > best) best = candidates[i].score
+
+    var shortlist = []
+    for (i = 0; i < candidates.length; i++)
+      if (candidates[i].score >= best - 1) shortlist.push(candidates[i])
+
+    return shortlist[Math.floor(Math.random() * shortlist.length)]
   }
 
   // Which slot the reply in flight belongs to: "current" for the round the
@@ -536,21 +718,25 @@ Panel {
   property bool fetchWidened: false
 
   Process {
-    id: metaProcess
+    id: wikiProcess
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         try {
           var candidates = root.parseCandidates(text)
-          if (candidates.length < 3 && !root.fetchWidened) {
-            // A thin result usually means a city centre nobody photographs.
-            // Widening once is cheaper than throwing the city away.
+          if (candidates.length < 3 && !root.fetchWidened
+              && root.searchRadiusKm * 1000 < root.maxRadiusMetres) {
+            // A thin result usually means a tight radius over a quarter nobody
+            // has written about. Widening to the API's ceiling is cheaper than
+            // throwing the city away -- and it is a genuine widen only when the
+            // player has set the radius below that ceiling, which is why it is
+            // guarded rather than attempted unconditionally.
             root.fetchWidened = true
-            root.requestMeta(root.fetchPlace, root.searchRadiusKm * 2500)
+            root.requestPlaces(root.fetchPlace, root.maxRadiusMetres)
             return
           }
           if (candidates.length === 0) throw new Error("no usable photos")
-          root.beginDownload(candidates[Math.floor(Math.random() * candidates.length)])
+          root.beginDownload(root.chooseCandidate(candidates))
         } catch (error) {
           root.fetchFailed("No photos found near there.")
         }
@@ -637,8 +823,67 @@ Panel {
     }
   }
 
+  // ----------------------------------------------------------- attribution
+  //
+  // Wikipedia's pageimages gives a usable thumbnail but no licence, and these
+  // photographs are almost all CC-licensed, so the credit has to be asked for
+  // separately. It is asked for at reveal, not at selection: the player is
+  // looking at the answer by then, so a 361-byte round trip costs nothing they
+  // can perceive, and keeping it off the selection path is part of what makes
+  // the first photo appear quickly.
+  //
+  // A credit that never arrives is not an error. The photo, the place and the
+  // score are all still right; only the by-line is missing, and saying so is
+  // better than blocking the reveal on it.
+  property string roundCredit: ""
+  property string roundLicence: ""
+
+  Process {
+    id: attrProcess
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var parsed = root.parseCappedJson(text, root.attrCapBytes)
+          var pages = parsed && parsed.query && Array.isArray(parsed.query.pages)
+              ? parsed.query.pages : []
+          if (pages.length === 0 || pages[0].missing) return
+
+          var info = Array.isArray(pages[0].imageinfo) && pages[0].imageinfo.length > 0
+              ? pages[0].imageinfo[0] : null
+          if (!info) return
+          var extra = info.extmetadata || {}
+
+          // The Commons Artist field is literal HTML by design -- a measured
+          // value was an anchor tag wrapping the photographer's name -- so
+          // creditText unwraps tags to their text rather than deleting them,
+          // which is the difference between showing "Nina R" and showing
+          // nothing at all.
+          root.roundCredit = Sanitise.creditText(extra.Artist ? extra.Artist.value : "", 90)
+          root.roundLicence = Sanitise.licenceText(
+              extra.LicenseShortName ? extra.LicenseShortName.value : "")
+        } catch (error) {
+          root.roundCredit = ""
+          root.roundLicence = ""
+        }
+      }
+    }
+  }
+
+  function requestAttribution() {
+    root.roundCredit = ""
+    root.roundLicence = ""
+    if (!root.round || !root.round.file || attrProcess.running) return
+    attrProcess.command = root.cappedCurl(
+        root.attributionUrl(root.round.file), root.attrCapBytes, 10)
+    attrProcess.running = true
+  }
+
   // ------------------------------------------------------------- round flow
 
+  // Returns { row, index } rather than the row alone, because the index is what
+  // records the city as used -- and a round prefetched before a game starts has
+  // to be able to carry that record across the reset that starting performs.
   function pickPlace() {
     if (root.poolSize <= 0) return null
     // Every city in the tier is eligible except the ones already seen this
@@ -651,17 +896,18 @@ Panel {
       var used = root.usedPlaces.slice(0)
       used.push(index)
       root.usedPlaces = used
-      return root.places[index]
+      return { row: root.places[index], index: index }
     }
-    return root.places[Math.floor(Math.random() * root.poolSize)]
+    var fallback = Math.floor(Math.random() * root.poolSize)
+    return { row: root.places[fallback], index: fallback }
   }
 
-  function requestMeta(place, radiusMetres) {
-    if (!place) {
+  function requestPlaces(pick, radiusMetres) {
+    if (!pick || !pick.row) {
       root.fetchFailed("No cities available.")
       return
     }
-    root.fetchPlace = place
+    root.fetchPlace = pick
 
     var now = Date.now()
     var wait = Math.max(0, root.minRequestGapMs - (now - root.lastRequestMs))
@@ -671,7 +917,7 @@ Panel {
     // onStreamFinished -- which runs *before* the process exits. Waiting is not
     // an optimisation here; it is what makes that path work on purpose rather
     // than by accident.
-    if (metaProcess.running || photoProcess.running) wait = Math.max(wait, 250)
+    if (wikiProcess.running || photoProcess.running) wait = Math.max(wait, 250)
 
     if (wait > 0) {
       // Queued, not dropped and not sent early: ten frantic clicks on Skip
@@ -683,16 +929,16 @@ Panel {
       return
     }
     root.lastRequestMs = now
-    metaProcess.command = root.cappedCurl(
-        root.commonsUrl(place[2], place[3], radiusMetres), root.metaCapBytes, 15)
-    metaProcess.running = true
+    wikiProcess.command = root.cappedCurl(
+        root.placesUrl(pick.row[2], pick.row[3], radiusMetres), root.wikiCapBytes, 15)
+    wikiProcess.running = true
   }
 
   Timer {
     id: gapTimer
     property real pendingRadius: 10000
     repeat: false
-    onTriggered: root.requestMeta(root.fetchPlace, pendingRadius)
+    onTriggered: root.requestPlaces(root.fetchPlace, pendingRadius)
   }
 
   function beginDownload(candidate) {
@@ -715,8 +961,11 @@ Panel {
       lat: candidate.lat,
       lon: candidate.lon,
       title: candidate.title,
-      credit: candidate.credit,
-      licence: candidate.licence,
+      // Kept so the reveal can ask Commons who took it, and so a round
+      // prefetched before the game began can record its city as used.
+      file: candidate.file,
+      placeIndex: root.fetchPlace && root.fetchPlace.index >= 0
+          ? root.fetchPlace.index : -1,
       path: path,
       city: nearest ? Sanitise.plainOneLine(nearest.name, 60) : "",
       country: nearest ? Sanitise.plainOneLine(nearest.country, 60) : "",
@@ -734,12 +983,12 @@ Panel {
     root.phase = "guessing"
   }
 
-  // How many different cities one round may try before giving up. Commons
-  // coverage is uneven -- a place can be tagged with nothing but municipal
-  // crests, or with nothing at all -- and on hard difficulty, where the pool
-  // runs down to towns of a few hundred thousand, that is common rather than
-  // rare. Dead-ending the round on the first miss would make the harder
-  // settings feel broken when they are merely thinly photographed.
+  // How many different cities one round may try before giving up. Wikipedia's
+  // coverage is uneven -- a city can have articles whose lead images are all
+  // crests, or barely any articles at all -- and on hard difficulty, where the
+  // pool runs down to towns of a few hundred thousand, that is common rather
+  // than rare. Dead-ending the round on the first miss would make the harder
+  // settings feel broken when they are merely thinly written about.
   readonly property int maxFetchAttempts: 5
   property int fetchAttempts: 0
 
@@ -756,7 +1005,7 @@ Panel {
       root.fetchWidened = false
       root.statusText = ""
       root.phase = "loading"
-      root.requestMeta(root.pickPlace(), root.searchRadiusKm * 1000)
+      root.requestPlaces(root.pickPlace(), root.searchRadiusKm * 1000)
       return
     }
 
@@ -772,9 +1021,14 @@ Panel {
       root.round = null
       root.guess = null
       root.statusText = ""
+      // Cleared here rather than at each caller, so Skip and the retry path get
+      // it too -- otherwise the previous round's photographer stays on screen
+      // underneath the next round's photograph.
+      root.roundCredit = ""
+      root.roundLicence = ""
       root.phase = "loading"
     }
-    root.requestMeta(root.pickPlace(), root.searchRadiusKm * 1000)
+    root.requestPlaces(root.pickPlace(), root.searchRadiusKm * 1000)
   }
 
   function startGame() {
@@ -784,14 +1038,31 @@ Panel {
       root.phase = "error"
       return
     }
+    // A round fetched while the panel sat on the start screen is the whole
+    // point of that prefetch: Start should show a photograph, not a spinner.
+    // It is taken before the reset and put back afterwards, and its city is
+    // seeded into usedPlaces so the reset cannot let the same place come round
+    // again later in the game.
+    var carried = root.pendingRound
+
     root.roundIndex = 0
     root.totalScore = 0
     root.results = []
-    root.usedPlaces = []
+    root.usedPlaces = carried && carried.placeIndex >= 0 ? [carried.placeIndex] : []
     root.pendingRound = null
     root.pendingFailed = false
+    root.roundCredit = ""
+    root.roundLicence = ""
     root.mapMode = root.defaultView
     if (mapLoader.item) mapLoader.item.resetView()
+
+    if (carried) {
+      root.round = carried
+      root.guess = null
+      root.statusText = ""
+      root.phase = "guessing"
+      return
+    }
     root.fetchRound("current")
   }
 
@@ -843,6 +1114,7 @@ Panel {
     root.totalScore += score
 
     root.phase = "revealed"
+    root.requestAttribution()
     if (mapLoader.item) mapLoader.item.frameResult()
 
     // Fetch the next round now, while the reveal is being read, so Next is
@@ -867,6 +1139,8 @@ Panel {
 
     root.roundIndex += 1
     root.guess = null
+    root.roundCredit = ""
+    root.roundLicence = ""
     if (mapLoader.item) mapLoader.item.resetView()
 
     if (root.pendingRound) {
@@ -880,8 +1154,38 @@ Panel {
     // request the player is waiting on.
     root.round = null
     root.phase = "loading"
-    if (!metaProcess.running && !photoProcess.running) root.fetchRound("current")
+    if (!wikiProcess.running && !photoProcess.running) root.fetchRound("current")
     else root.fetchTarget = "current"
+  }
+
+  // Fetches the first round while the player is still looking at the start
+  // screen, so pressing Start shows a photograph instead of a spinner.
+  //
+  // This is the fix for "the first image takes a long time to load". Nothing
+  // about that request was slow; it simply had not been made yet. Everything
+  // after the first round was already instant, because a reveal starts the next
+  // round's fetch behind it -- the first round was the only one with nothing
+  // running ahead of it.
+  //
+  // Deliberately triggered by opening the panel rather than by the shell
+  // starting. Opening the game is the player saying they intend to play; the
+  // shell mounting this plugin at login is not, and spending a request and a
+  // photograph on everyone who never opens it would be rude.
+  function warmFirstRound() {
+    if (root.phase !== "idle") return
+    if (root.pendingRound || root.cacheDir === "") return
+    if (wikiProcess.running || photoProcess.running) return
+
+    // A warm belongs to a game that has not started, so the used-city list
+    // starts empty. Without this, opening and closing the panel while the
+    // network is down would push one more city onto that list every time and
+    // eventually leave the pool with nothing it was willing to draw.
+    root.usedPlaces = []
+    root.fetchRound("pending")
+  }
+
+  onOpenedChanged: {
+    if (root.opened) Qt.callLater(root.warmFirstRound)
   }
 
   function skipRound() {
@@ -895,6 +1199,8 @@ Panel {
     root.pendingRound = null
     root.guess = null
     root.statusText = ""
+    root.roundCredit = ""
+    root.roundLicence = ""
   }
 
   // ---------------------------------------------------------------- the view
@@ -1091,27 +1397,43 @@ Panel {
           }
 
           // ---- the playing board
-          Column {
+          //
+          // Photo and map side by side, not stacked.
+          //
+          // Stacking was right while the map was equirectangular: that
+          // projection is twice as wide as it is tall, so it filled a wide,
+          // short pane exactly. Mercator's world is SQUARE, and a square fitted
+          // into a pane three times wider than it is tall can only ever occupy
+          // the middle third of it -- the map came out 285 px across in a 940 px
+          // panel, with the rest of the width empty.
+          //
+          // Two nearly-square halves suit both: the map gets a pane it can fill,
+          // and a photograph shown whole -- which it now is -- fits a tall pane
+          // better than a wide one, because portrait shots stop being reduced to
+          // a sliver.
+          Row {
             anchors.fill: parent
             spacing: Style.space(8)
             visible: root.phase === "loading" || root.phase === "guessing" || root.phase === "revealed"
 
             PhotoPane {
               id: photo
-              width: parent.width
-              height: Math.round(parent.height * 0.44)
+              height: parent.height
+              width: Math.round((parent.width - parent.spacing) * 0.46)
               photoPath: root.round ? root.round.path : ""
               loading: root.phase === "loading"
               showAttribution: root.phase === "revealed"
               photoTitle: root.round ? root.round.title : ""
-              photoCredit: root.round ? root.round.credit : ""
-              photoLicence: root.round ? root.round.licence : ""
+              // Fetched separately at reveal, so these fill in a moment after
+              // the answer appears rather than arriving with the photograph.
+              photoCredit: root.roundCredit
+              photoLicence: root.roundLicence
               foreground: root.bar ? root.bar.foreground : Color.popups.text
             }
 
             Item {
-              width: parent.width
-              height: parent.height - photo.height - parent.spacing
+              height: parent.height
+              width: parent.width - photo.width - parent.spacing
 
               // The 130 KiB of country outlines are imported by GlobeMap.qml, so
               // they stay out of the QML engine until someone actually plays.
@@ -1141,8 +1463,23 @@ Panel {
                 }
               }
 
+              // The map is built the moment the panel opens, not when a round
+              // starts.
+              //
+              // Loading it pulls 130 KiB of outlines into the QML engine and
+              // paints 10,340 points for the first time, and that work used to
+              // land in the same instant as the first photograph's decode --
+              // two expensive things competing on the GUI thread at exactly the
+              // moment the player is waiting. Opening the panel happens seconds
+              // before Start is pressed, and the work is invisible there.
+              //
+              // active latches true and never goes back: a game in progress
+              // must not lose its map because the panel was closed for a moment.
               Connections {
                 target: root
+                function onOpenedChanged() {
+                  if (root.opened && !mapLoader.active) mapLoader.active = true
+                }
                 function onPhaseChanged() {
                   if (!mapLoader.active
                       && (root.phase === "loading" || root.phase === "guessing"))

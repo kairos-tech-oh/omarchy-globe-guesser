@@ -76,7 +76,8 @@ stdout before any signal fires, so the ceiling is upstream of it in all four:
 
 | Process | Producer bound |
 |---|---|
-| `metaProcess` | `cappedCurl()` → `curl … \| head -c $((CAP+1))`, CAP 512 KiB |
+| `wikiProcess` | `cappedCurl()` → `curl … \| head -c $((CAP+1))`, CAP 256 KiB |
+| `attrProcess` | same helper, CAP 32 KiB |
 | `stateReader` | the command *is* `head -c $((CAP+1))`, CAP 64 KiB |
 | `dirProcess` | `printf %s "$d" \| head -c 4097` |
 | `photoProcess` | `printf %s "$t" \| head -c 4097`; the photo itself never reaches stdout — `curl --max-filesize 6000000` writes it to a file |
@@ -147,6 +148,42 @@ and those same bytes are validated and used; there is no second open. The photo
 is downloaded, magic-checked and its path emitted inside a single script
 invocation, so the bytes that are checked are the bytes that are kept.
 
+## Map tiles: the one remote `Image`, and why it is not the same thing
+
+`TileLayer.qml` assigns a network URL to `Image.source`. Everywhere else this
+plugin refuses to do that, so the distinction is worth stating precisely rather
+than leaving a reviewer to infer it.
+
+| | photograph | map tile |
+|---|---|---|
+| where the URL comes from | inside an API response | composed here: a hardcoded host, a hardcoded style, three integers |
+| can anything remote influence it | yes | no — there is no input |
+| how it is fetched | `curl` under `--max-filesize`, host allowlist, no redirects, magic-checked, then loaded as a **local file** | `Image`, because there is nothing to check |
+
+The three integers come from `GeoMath.tileGrid()`, and both check suites assert —
+for every zoom the UI can reach — that each is an integer inside the tile
+pyramid, that the count is bounded, and that each tile's own corner lands where
+the projection puts that corner's coordinate. The last of those is the identity
+that keeps the tiles and the guess pin from drifting apart; a map that disagreed
+with its own projection would put every guess quietly off by however much.
+
+Bounded: at most 64 tiles exist at once (about 18 for a typical pane), and the
+ceiling is applied while the grid is **built**, not after — each entry becomes an
+`Image` that fetches and decodes inside the shared shell process.
+
+**Provider.** Tiles come from `basemaps.cartocdn.com`, not
+`tile.openstreetmap.org`. The OSM Foundation's tile usage policy forbids
+distributing an application that draws on their servers; they are donated
+infrastructure for the map's own website. CARTO renders the same OpenStreetMap
+data and publishes these basemaps for public use with attribution, which is drawn
+on the map: `© OpenStreetMap contributors © CARTO`. There is marketplace
+precedent — the listed `eduardodallecort.weather-radar` uses the same host.
+
+**Offline.** Tiles are an enhancement, not a dependency. `TileLayer` counts
+consecutive failures and reports itself unhealthy after eight with no success,
+at which point the bundled Natural Earth outlines are drawn instead and the game
+stays playable. The globe never used tiles at all.
+
 ## Untrusted input driving a path or an allocation
 
 - The photo URL arrives inside an API response and is checked against a
@@ -212,8 +249,9 @@ limit (130 KB and 43 KB), so the scan cannot fail closed on them.
 
 ## Rate limits
 
-Two requests per round, one round at a time.
-`commons.wikimedia.org` publishes no hard anonymous limit for read queries, but
+Three requests per round, one round at a time: one article query, one photo
+download, and one 361-byte credit lookup at reveal.
+Wikimedia publishes no hard anonymous limit for read queries, but
 its [user-agent policy](https://foundation.wikimedia.org/wiki/Policy:User-Agent_policy)
 requires a descriptive User-Agent identifying the application; a stock library
 User-Agent is explicitly not acceptable. This plugin sends
@@ -238,10 +276,48 @@ hot-reload:
   sentinel file — each fell back to defaults; the symlink was replaced rather
   than followed and the sentinel was untouched.
 - Cache directory confirmed at mode 0700 with files at 0600.
+- The article query, the credit query and the filters were exercised against the
+  live APIs over twelve cities, with the regexes read out of `Panel.qml` rather
+  than retyped, so the measurements above describe the shipped code.
+- All six candidate tile hosts were probed directly; every one answers without a
+  key, and `basemaps.cartocdn.com/dark_all` returns ~9 KB per tile. Tiles were
+  confirmed present at levels 10, 14, 17, 18 and 19 -- the depths the derived
+  zoom ceiling now reaches.
+- A full round was played against a hard-refreshed shell after the change: the
+  photograph renders whole with its blurred backdrop, the OpenStreetMap tiles
+  draw with their attribution, both pins and the line between them land on the
+  tiled map, and the credit fetched from Commons at reveal appeared correctly
+  (`Jehangir · CC BY-SA 3.0`). `preview.png` is a crop of that session.
+
+### Photo source
+
+Rounds come from **English Wikipedia article lead images**, not from a Commons
+file geosearch. The first release used the latter and it was the wrong source:
+Commons geosearch returns everything anyone ever tagged with a coordinate, so
+rounds regularly showed a plate of food, an insect, a museum exhibit or
+somebody's dog — none of which can be guessed from, because none of them look
+like anywhere.
+
+A Wikipedia article that carries a coordinate is almost by definition a place,
+and its lead image is a photograph an editor chose to show what that place looks
+like. Measured over twelve cities the change also made the reply five to eight
+times smaller (17–30 KB against 89–153 KB) and found far more usable photos —
+Reykjavík went from 3 to 25.
+
+Three filters and a score run over that already-good source: articles that carry
+a coordinate without being a place (events, meta-articles, museum ships), files
+that are not photographs (coats of arms, flags, logos, maps — checked on the
+*file* extension, because Wikimedia renders an SVG thumbnail as a PNG and 14 of
+254 sampled lead images were SVG crests), and a ranking that lifts place-like
+subjects above close-ups. Selection is random within one point of the best
+score, so a city does not show the same photograph every time it comes up.
+
+Over 12 cities this yields 332 usable candidates, minimum 18. The largest reply
+measured 29,529 bytes against a 256 KiB ceiling — 8.9× headroom.
 
 ### Fixed during verification
 
-Four defects were found by testing rather than by reading, and all four are
+Four defects were found by live testing rather than by reading, and all four are
 fixed:
 
 1. **The poles were clipped.** The flat map scaled by width alone, so on the
@@ -261,6 +337,78 @@ fixed:
 4. **The photo cache grew unbounded within an hour.** Pruning was by age only,
    so a long sitting accumulated one file per round in tmpfs. Now bounded by
    count as well, to three.
+
+Three more were found afterwards by exercising the APIs directly:
+
+5. **The radius setting was silently invalid.** MediaWiki refuses a geosearch
+   radius outside 10–10,000 m outright. The setting allowed up to 50 km and the
+   widen-retry asked for 25 km, so that retry could only ever spend a request on
+   an error reply. The setting is now 1–10 km, the value is clamped again at the
+   call, and the widen only fires when the player has narrowed below the ceiling.
+6. **`prop=coordinates` and `prop=pageimages` default to 10 pages.** Without
+   `colimit=max` and `pilimit=max` only the first ten articles come back usable,
+   which is indistinguishable from a sparse city. Setting both took a sample
+   city from 8 usable candidates to 42.
+7. **The photograph was being cropped, not shown.** `PreserveAspectCrop` filled
+   the pane and quietly cut the top and bottom off every landscape shot — the
+   horizon and the skyline above it, which are exactly what a player guesses
+   from. It now fits, with a blurred, dimmed copy of the same photograph filling
+   the letterbox gaps so the pane still reads as one image.
+8. **The zoom ceiling could not reach street level.** `zoom` is a multiple of
+   the world-fits-the-pane size, so a flat maximum of 40 tops out at tile level
+   6 on a 330 px pane — country outlines. The ceiling is now derived from the
+   tile pyramid itself, so it reaches level 19 whatever size the pane is, and a
+   wheel notch is √2 rather than 1.25 (fifty-four notches from world to street
+   is not zooming, it is grinding).
+9. **A Repeater over a recomputed array rebuilt every tile, every frame.** The
+   tile model was derived from the view, so each drag frame handed the Repeater
+   a fresh array and it destroyed and recreated all eighteen `Image` delegates.
+   The tile *window* is now separated from tile *positions*: the model is
+   rebuilt only when a whole row or column comes into view, and positions are
+   bindings. Measured over a 2,000-frame drag: 12 rebuilds instead of 2,000.
+10. **An invisible `Image` still loads.** Hiding the tile layer in globe mode
+   left its bindings live, so spinning the globe kept moving the tile window and
+   fetching tiles that were never drawn. The layer is now gated on an `active`
+   flag that empties the model, not merely on `visible`.
+11. **A change handler does not fire on initialisation.** The first `frameKey`
+   is computed while the component is being set up, so `onFrameKeyChanged` never
+   ran and the layer could come up with a valid window and an empty model.
+   `Component.onCompleted` now seeds it.
+12. **The board layout no longer suited the projection.** Photo and map were
+   stacked, which was right while the map was equirectangular -- twice as wide
+   as tall, so it filled a wide, short pane exactly. Mercator's world is square,
+   and a square in a pane three times wider than it is tall came out 285 px
+   across in a 940 px panel. They are side by side now, which suits both: the
+   map gets a pane it can fill, and a photograph shown whole fits a tall pane
+   better than a wide one.
+13. **A shell-metacharacter blocklist on filenames was deleting real data.** The
+   filename is escaped by `encodeURIComponent` and passed as argv, never through
+   a shell, so quotes and ampersands were never dangerous on that path —
+   but refusing them dropped 6.6% of 333 sampled real filenames, every one a
+   legitimate French or Italian name (*Musée de l'homme*, *Pont de l'Alma*,
+   *Sant'Andrea al Quirinale*). It now refuses control characters and an absurd
+   length, which are the only things that could actually forge request structure.
+
+### Projection
+
+The flat map is Web Mercator, not the equirectangular projection of the first
+release. That is not a preference — every slippy-map tile in the world is cut to
+Mercator, and a map drawn in one projection while its tiles are cut to another
+puts the streets and the pin in different places. Both suites assert the tile
+corners and the projection agree to a thousandth of a pixel.
+
+Two consequences are deliberate and worth naming:
+
+- **The poles are gone.** Mercator sends them to infinity; every tile scheme cuts
+  the world off at 85.05°. Latitudes beyond that clamp rather than exploding, so
+  a pin near a pole still lands on a finite pixel instead of at `NaN`.
+- **The world does not repeat.** Slippy maps normally tile east-west, and that is
+  right for a map you read and wrong for a map you click: this pane is nearly
+  three times wider than it is tall, so at minimum zoom three copies would be on
+  screen and a pin is drawn at whichever is nearest the centre — two clicks in
+  three would drop the marker a whole world-width from where they landed. The map
+  is a single sheet, the background beside it is not clickable, and both suites
+  assert that.
 
 ### Not verified
 

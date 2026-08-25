@@ -8,13 +8,16 @@ kept.
 
 ## What it does
 
-- **A real photo, with real coordinates.** Each round draws a city from a
-  bundled list of the 1,000 largest in the world, then asks Wikimedia Commons
-  for photographs taken near it. The answer is the photograph's *own* recorded
-  position, not the city centre.
-- **Two ways to guess.** A flat world map, or a globe you can spin. Both are
-  drawn from bundled Natural Earth outlines, so both work with the machine
-  offline — only the photograph needs a connection.
+- **A real photo of a real place.** Each round draws a city from a bundled list
+  of the 1,000 largest in the world, then asks Wikipedia which *articles* sit
+  near it and takes their lead images. An article with a coordinate is almost by
+  definition a place — a station, a bridge, a district, a cathedral — and its
+  lead image is a photograph an editor chose to show what that place looks like.
+  The answer is the article's own recorded position, not the city centre.
+- **Two ways to guess.** An OpenStreetMap map you can zoom down to street level,
+  or a globe you can spin. The map draws OpenStreetMap tiles; the globe, and the
+  map when there is no network, are drawn from bundled Natural Earth outlines —
+  so the game stays playable offline, it simply loses the detail.
 - **Playable without a mouse.** Arrow keys (or `hjkl`) place and nudge the pin,
   `Enter` confirms, `M` and `G` switch between map and globe, `Esc` closes.
 - **Attribution shown.** Commons photographs are almost all CC-licensed. The
@@ -27,7 +30,7 @@ kept.
 |---|---|
 | Click the map or globe | Place your guess |
 | Drag | Pan the map, or spin the globe |
-| Scroll | Zoom, centred on the pointer |
+| Scroll | Zoom, centred on the pointer — the map goes all the way to street level |
 | Arrow keys / `hjkl` | Place the pin, then nudge it — finer the further you are zoomed in |
 | `M` / `G` | Switch to the map / the globe |
 | `Enter` | Confirm the guess, then move to the next round |
@@ -94,27 +97,54 @@ Under *Fun* in the Omarchy settings UI.
 | Difficulty | easy / normal / hard | normal | Which cities a round can come from: the 150 largest, the 500 largest, or all 1,000 |
 | Rounds per game | 3–10 | 5 | How many photos make up one game |
 | Starting view | map / globe | map | Which surface a round opens on. You can switch mid-round either way |
-| Photo radius (km) | 5–50 | 10 | How far from a city centre a photo may have been taken. Larger finds more countryside; smaller keeps photos recognisably in the city |
+| Photo radius (km) | 1–10 | 10 | How far from a city centre a place may be. 10 km is both the default and MediaWiki's hard ceiling for a geosearch, so this only ever narrows the search |
 
 ## Network use
 
-Two requests per round, both anonymous, neither needing an API key or an
+Three small requests per round, all anonymous, none needing an API key or an
 account.
 
 | Service | What for | Published limit | What this plugin does |
 |---|---|---|---|
-| `commons.wikimedia.org/w/api.php` | One `geosearch` query listing photographs near a city, with their coordinates, licence and author | No hard anonymous limit; the [user-agent policy](https://foundation.wikimedia.org/wiki/Policy:User-Agent_policy) requires a descriptive User-Agent | Sends one identifying User-Agent, one query per round, and never more than one request per second |
+| `en.wikipedia.org/w/api.php` | One `geosearch` query listing articles near a city with their coordinates and lead images | No hard anonymous limit; the [user-agent policy](https://foundation.wikimedia.org/wiki/Policy:User-Agent_policy) requires a descriptive User-Agent | One identifying User-Agent, one query per round, never more than one request per second. Measured 17–30 KB per reply |
 | `upload.wikimedia.org` | Downloads the one chosen photograph | — | One download per round, capped at 6 MB, no redirects followed |
+| `commons.wikimedia.org/w/api.php` | The photographer and licence for that one file, so the credit can be shown | as above | One request per round, at reveal, off the path that decides how fast the photo appears. Measured 361 bytes |
+| `basemaps.cartocdn.com` | OpenStreetMap map tiles, while the map is on screen | Free public basemaps, attribution required | At most 64 tiles at a time, ~18 for a typical pane. Cached by URL, so panning back over ground already seen costs nothing |
 
-Every response is capped at the producer before the shell can hold it: 512 KiB
-for the query, 6 MB for the photograph. Nothing else is contacted, ever. The
-map, the globe, the scoring and the "12 km from Kyoto" line are all computed
-from bundled data.
+**Why CARTO and not `tile.openstreetmap.org`.** The OSM Foundation's
+[tile usage policy](https://operations.osmfoundation.org/policies/tiles/) forbids
+distributing an application that draws on their servers — they are donated
+infrastructure for the map's own website, not a free CDN. CARTO renders the same
+OpenStreetMap data and publishes these basemaps for public use with attribution,
+which the map shows.
+
+Every response is capped at the producer before the shell can hold it: 256 KiB
+for the article query, 32 KiB for the credit, 6 MB for the photograph. Nothing
+else is contacted, ever. The map, the globe, the scoring and the "12 km from
+Kyoto" line are all computed from bundled data.
+
+Map tiles are the one thing here loaded straight into an `Image`. That is
+deliberate and is the opposite of how the photographs are treated: a tile URL is
+a hardcoded host plus three integers this plugin computed from the size of the
+pane, with nothing in it that came off the network, whereas a photograph's URL
+arrives inside an API response and is therefore checked, fetched under a byte
+ceiling, and magic-checked before anything renders it.
+
+One extra request happens when you **open** the panel while no game is running:
+the first round is fetched while you are still looking at the start screen, so
+pressing Start shows a photograph rather than a spinner. Opening the game is
+taken as intending to play; merely having the widget on your bar is not, and
+nothing is fetched at login.
 
 Turn the network off mid-game and the photograph fails with a readable message
-and a **Try another** button; the guessing surface itself never needed it.
+and a **Try another** button. The map notices its tiles are not arriving and
+falls back to the bundled outlines, so you can still place a guess — with
+country shapes instead of streets.
 
 ## Where the map comes from
+
+The detailed map is OpenStreetMap data, rendered by CARTO, fetched as tiles while
+you play. The fallback map and the globe come from bundled data:
 
 `data/WorldOutline.js` and `data/Places.js` are generated from
 [Natural Earth](https://www.naturalearthdata.com/) (public domain), pinned to an
@@ -142,7 +172,8 @@ uses, and is not Node.
 |---|---|
 | `BarWidget.qml` | The bar slot and the click target that opens the panel |
 | `Panel.qml` | The game: state machine, the two network calls, scoring, persistence |
-| `GlobeMap.qml` | The guessing surface — outline canvas, markers, pan/zoom/spin |
+| `GlobeMap.qml` | The guessing surface — tiles, outline canvas, markers, pan/zoom/spin |
+| `TileLayer.qml` | The OpenStreetMap tile grid, and noticing when it cannot be reached |
 | `PhotoPane.qml` | The photograph, its loading and error states, and its attribution |
 | `GeoMath.js` | Projections and their inverses, great-circle distance, the score curve |
 | `Sanitise.js` | Everything that crosses into or out of the plugin as text |
@@ -157,9 +188,17 @@ checks, never to play.
 
 ## Attribution
 
-Photographs are served by [Wikimedia Commons](https://commons.wikimedia.org/)
-and remain under their own licences, shown with each answer. Map and city data
-are from [Natural Earth](https://www.naturalearthdata.com/), public domain.
+Photographs are the lead images of [Wikipedia](https://en.wikipedia.org/)
+articles, served by [Wikimedia Commons](https://commons.wikimedia.org/), and
+remain under their own licences, shown with each answer.
+
+Map tiles are © [OpenStreetMap](https://www.openstreetmap.org/copyright)
+contributors, © [CARTO](https://carto.com/attributions), shown on the map itself.
+OpenStreetMap data is licensed under the
+[ODbL](https://opendatacommons.org/licenses/odbl/).
+
+The bundled fallback map and the city list are from
+[Natural Earth](https://www.naturalearthdata.com/), public domain.
 
 ## Licence
 

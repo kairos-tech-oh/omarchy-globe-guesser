@@ -42,6 +42,15 @@ function clamp(value, low, high) {
 var DEG = Math.PI / 180
 var RAD = 180 / Math.PI
 
+// The width of an edge, in pixels. Used by both projections, for the same
+// reason in each: a point that lies exactly ON the edge of the world -- the
+// globe's limb, or the top of the Mercator square -- projects to a coordinate
+// that the arithmetic bringing it back lands a few ULPs outside. An exact
+// comparison rejects precisely the ring of real coordinates the projection is
+// least able to reproduce. Half a pixel is far below anything a mouse can
+// express, so this widens no click that should have missed.
+var LIMB_TOLERANCE_PX = 0.5
+
 // Wraps a longitude difference into (-180, 180]. Used everywhere a longitude
 // is compared or drawn: without it a line from Tokyo to San Francisco takes
 // the long way round the map, straight through Europe.
@@ -51,52 +60,195 @@ function wrapLongitude(degrees) {
   return wrapped - 180
 }
 
-// ---------------------------------------------------------- equirectangular
+// --------------------------------------------------------------- mercator
 //
-// The plain rectangular projection: longitude is x, latitude is y, both linear.
-// Chosen over Mercator because a guessing map should not silently make Greenland
-// a fourteenth of the planet, and because its inverse is exact everywhere
-// including the poles.
+// The flat map is Web Mercator, the projection every slippy-map tile in the
+// world is cut to. It is not the projection you would choose to look at -- it
+// makes Greenland the size of Africa -- but the map is here to be CLICKED, and
+// clicking is only as precise as the agreement between where a tile draws a
+// street and where the maths thinks that street is. Any other projection puts
+// the tiles and the pin in different places.
 //
-// At zoom 1 the whole world is visible, which means the scale has to satisfy
-// BOTH axes: 360 degrees of longitude across the width and 180 of latitude down
-// the height. Taking width/360 alone is what clips the poles off a pane that is
-// wider than it is twice-as-tall -- which is every pane this game uses, because
-// the photo takes the top half.
-function mapScale(view) {
-  return Math.min(view.width / 360, view.height / 180) * view.zoom
+// World coordinates are normalised: x and y both run 0..1 over the whole world,
+// with y = 0 at the top. Multiplying by the world size in pixels gives screen
+// space, and the same 0..1 space is what tile indices are computed from, so the
+// tile grid and the pin cannot drift apart.
+
+// Mercator cannot represent the poles: the projection sends them to infinity.
+// This is the latitude at which the world becomes exactly square, and it is the
+// same number every tile scheme uses.
+var MERCATOR_MAX_LAT = 85.05112877980659
+
+function lonToWorldX(longitude) {
+  return (wrapLongitude(longitude) + 180) / 360
 }
 
+function latToWorldY(latitude) {
+  var phi = clamp(latitude, -MERCATOR_MAX_LAT, MERCATOR_MAX_LAT) * DEG
+  return (1 - Math.log(Math.tan(phi) + 1 / Math.cos(phi)) / Math.PI) / 2
+}
+
+function worldXToLon(x) {
+  return wrapLongitude(x * 360 - 180)
+}
+
+function worldYToLat(y) {
+  return Math.atan(sinh(Math.PI * (1 - 2 * y))) * RAD
+}
+
+// V4 has no Math.sinh in every build the shell might be running, and the
+// identity is two exponentials. Cheaper to be certain than to find out from a
+// bug report that the map is blank on somebody's machine.
+function sinh(x) {
+  return (Math.exp(x) - Math.exp(-x)) / 2
+}
+
+// The width of the whole world in pixels at the current zoom.
+//
+// Derived from the SMALLER pane dimension so that at zoom 1 the entire latitude
+// range is on screen. Mercator's world is square, so fitting it to the larger
+// dimension of a wide pane would push the poles off the top and bottom -- and
+// the game draws from cities as far north as Reykjavik, which would then be
+// unreachable without panning. Horizontally the world simply repeats, the way
+// every slippy map does.
+function mapWorldSize(view) {
+  return Math.min(view.width, view.height) * view.zoom
+}
+
+// ONE world, not a repeating strip.
+//
+// Slippy maps normally repeat east-west, and that is right for a map you are
+// reading. It is wrong for a map you are clicking. This pane is nearly three
+// times wider than it is tall, so at minimum zoom three copies of the world
+// would be on screen at once -- and a pin is drawn at whichever copy is nearest
+// the centre, so two clicks in three would drop the marker a whole world-width
+// from where the player actually clicked. A single sheet from -180 to +180 has
+// no such ambiguity: what you click is where the pin goes.
+//
+// The cost is that panning does not continue across the antimeridian; you reach
+// the edge of the sheet and stop. That is a smaller price than a pin that lands
+// somewhere else.
 function projectMap(view, latitude, longitude) {
-  var scale = mapScale(view)
+  var size = mapWorldSize(view)
   return {
-    x: view.width / 2 + wrapLongitude(longitude - view.centreLon) * scale,
-    y: view.height / 2 - (latitude - view.centreLat) * scale,
+    x: view.width / 2 + (lonToWorldX(longitude) - lonToWorldX(view.centreLon)) * size,
+    y: view.height / 2 + (latToWorldY(latitude) - latToWorldY(view.centreLat)) * size,
     visible: true
   }
 }
 
 function unprojectMap(view, x, y) {
-  var scale = mapScale(view)
-  if (scale <= 0) return null
-  var latitude = view.centreLat + (view.height / 2 - y) / scale
+  var size = mapWorldSize(view)
+  if (size <= 0) return null
 
-  // Off the top or bottom of the world is not a place. Returning null rather
-  // than clamping keeps a click well above the north pole from scoring as a
-  // guess at the north pole.
+  var worldX = lonToWorldX(view.centreLon) + (x - view.width / 2) / size
+  var worldY = latToWorldY(view.centreLat) + (y - view.height / 2) / size
+
+  // Off the edge of the sheet is not a place. At minimum zoom the world is
+  // narrower than the pane, so there is real background either side of it, and
+  // a click out there has to mean nothing rather than mean the nearest coast.
   //
-  // The tolerance is the same half-pixel the globe's limb uses, and for the
-  // same reason: at zoom 1 the pole projects to exactly the edge of the pane,
-  // and the division that brings it back lands a few ULPs outside the 90 it
-  // should equal. Without this the one row of pixels containing Antarctica is
-  // unclickable.
-  var slack = LIMB_TOLERANCE_PX / scale
-  if (latitude > 90 + slack || latitude < -90 - slack) return null
-  latitude = clamp(latitude, -90, 90)
+  // The tolerance is the same half-pixel the globe's limb uses and is there for
+  // the same reason: at zoom 1 the edges of the world land exactly on the edges
+  // of the pane, and the divisions between here and there put them a few ULPs
+  // outside the 0 or 1 they should equal.
+  var slack = LIMB_TOLERANCE_PX / size
+  if (worldX < -slack || worldX > 1 + slack) return null
+  if (worldY < -slack || worldY > 1 + slack) return null
+
   return {
-    lat: latitude,
-    lon: wrapLongitude(view.centreLon + (x - view.width / 2) / scale)
+    lat: worldYToLat(clamp(worldY, 0, 1)),
+    lon: worldXToLon(clamp(worldX, 0, 1))
   }
+}
+
+// ------------------------------------------------------------------- tiles
+//
+// The raster tile grid covering the current view.
+//
+// Computed from the same normalised 0..1 world coordinates the projection uses,
+// which is the point: the tiles and the pin are derived from one set of numbers,
+// so they cannot drift apart. A tile scheme that agreed with the projection only
+// approximately would put every guess quietly off by however much it disagreed.
+var TILE_SIZE = 256
+var MAX_TILE_ZOOM = 19
+
+// Which integer zoom level of the pyramid is closest to the current continuous
+// zoom. Rounding rather than flooring keeps tiles within a factor of root two
+// of their native size, so they are never upscaled more than about 41% and
+// never wastefully downscaled by more than the same.
+function tileZoomFor(view) {
+  var size = mapWorldSize(view)
+  if (!(size > 0)) return 0
+  return clamp(Math.round(Math.log(size / TILE_SIZE) / Math.LN2), 0, MAX_TILE_ZOOM)
+}
+
+// The tile window: which level of the pyramid, how big a tile is on screen, and
+// where the pane's top-left corner sits in tile units.
+//
+// Split out from tileGrid deliberately. Panning changes `left` and `top`
+// continuously but changes which tiles are needed only when a whole new row or
+// column comes into view. Keeping the two apart lets the layer rebuild its model
+// on the rare event and merely move what it already has on the common one --
+// otherwise every drag frame destroys and recreates every tile Image, which is
+// both wasteful and visible as flicker.
+function tileFrame(view) {
+  var size = mapWorldSize(view)
+  if (!(size > 0) || !(view.width > 0) || !(view.height > 0)) return null
+
+  var z = tileZoomFor(view)
+  var n = Math.pow(2, z)
+  var px = size / n
+
+  var left = lonToWorldX(view.centreLon) * n - (view.width / 2) / px
+  var top = latToWorldY(view.centreLat) * n - (view.height / 2) / px
+
+  return {
+    z: z,
+    n: n,
+    px: px,
+    left: left,
+    top: top,
+    iMin: Math.floor(left),
+    iMax: Math.floor(left + view.width / px),
+    jMin: Math.floor(top),
+    jMax: Math.floor(top + view.height / px)
+  }
+}
+
+function tileGrid(view, maxTiles) {
+  var out = []
+  var frame = tileFrame(view)
+  if (!frame) return out
+
+  var limit = maxTiles > 0 ? maxTiles : 64
+
+  for (var j = frame.jMin; j <= frame.jMax; j++) {
+    // Mercator has no tiles above the top of the world or below its bottom, and
+    // no copy of the world east or west of it either -- see projectMap.
+    if (j < 0 || j >= frame.n) continue
+    for (var i = frame.iMin; i <= frame.iMax; i++) {
+      if (i < 0 || i >= frame.n) continue
+      // The ceiling is on what is BUILT, not on what is drawn afterwards. Each
+      // entry becomes an Image that fetches and decodes, so an unbounded grid
+      // is an unbounded number of requests into the shared shell process.
+      if (out.length >= limit) return out
+      out.push({
+        z: frame.z,
+        x: i,
+        y: j,
+        // Where this tile sits right now. The layer does not read these -- it
+        // binds positions to the frame so panning does not rebuild the model --
+        // but the check suites assert they match what project() says the tile's
+        // own corner coordinate maps to, which is what proves the tiles and the
+        // guess pin cannot drift apart.
+        sx: (i - frame.left) * frame.px,
+        sy: (j - frame.top) * frame.px,
+        size: frame.px
+      })
+    }
+  }
+  return out
 }
 
 // ------------------------------------------------------------- orthographic
@@ -106,10 +258,6 @@ function unprojectMap(view, x, y) {
 //
 // The radius is derived from the smaller dimension so the globe fits whatever
 // shape the pane is, and zoom scales it about the centre.
-
-// See unprojectGlobe: this is the width of the limb, in pixels, not a fudge
-// factor. Sub-pixel on purpose.
-var LIMB_TOLERANCE_PX = 0.5
 
 function globeRadius(view) {
   return (Math.min(view.width, view.height) / 2) * 0.92 * view.zoom

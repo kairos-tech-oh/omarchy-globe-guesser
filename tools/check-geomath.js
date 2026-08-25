@@ -88,6 +88,12 @@ for (const view of views) {
        `got x=${projected.x} y=${projected.y}`)
     if (!projected.visible) continue
 
+    // Mercator sends the poles to infinity and every tile scheme cuts the world
+    // off at 85.05 degrees instead. A point beyond that is clamped on the way
+    // out, so it cannot come back as itself -- that is the projection working,
+    // not a rounding failure, and it is asserted as clamping further down.
+    if (view.mode === "map" && Math.abs(lat) > Geo.MERCATOR_MAX_LAT) continue
+
     // Only points that land inside the pane are round-tripped. A visible point
     // off the edge of the widget is legitimate -- it is simply scrolled out of
     // sight -- and unproject is not defined for coordinates the user cannot
@@ -124,23 +130,162 @@ for (const view of views) {
   near(centre.lon, 0, 1e-9, "globe centre longitude")
 }
 
-// At zoom 1 the entire world has to be inside a wide, short pane -- both poles
-// and both edges. This is the regression that clipped the Arctic off the board.
+// At zoom 1 the whole usable world has to be inside a wide, short pane. This is
+// the regression that clipped the Arctic off the board, restated for Mercator:
+// the world is square here, so it is fitted to the SHORTER pane dimension, and
+// anything wider than that repeats rather than being cut off.
 {
   const view = { mode: "map", width: 940, height: 330, zoom: 1, centreLat: 0, centreLon: 0 }
-  for (const [lat, lon] of [[90, 0], [-90, 0], [0, -180], [0, 179.99], [71, -8]]) {
+  for (const [lat, lon] of [[85, 0], [-85, 0], [0, -180], [0, 179.99],
+                            [71, -8], [64.14, -21.9], [-54.8, -68.3]]) {
     const p = Geo.project(view, lat, lon)
     ok(p.x >= -1 && p.x <= view.width + 1 && p.y >= -1 && p.y <= view.height + 1,
        `whole world fits at zoom 1: (${lat},${lon})`, `got x=${p.x} y=${p.y}`)
   }
+  // The world is exactly as tall as the pane at zoom 1, so the two edges land
+  // on the two edges. If this drifts, the top or bottom of the map is either
+  // clipped or floating.
+  near(Geo.mapWorldSize(view), 330, 1e-9, "world size fits the shorter dimension")
+  near(Geo.project(view, Geo.MERCATOR_MAX_LAT, 0).y, 0, 0.6, "north edge sits at the pane top")
+  near(Geo.project(view, -Geo.MERCATOR_MAX_LAT, 0).y, 330, 0.6, "south edge sits at the pane bottom")
 }
 
-// The flat map must refuse a click above the pole rather than clamping to it.
+// ------------------------------------------------------------------ mercator
+
+// The identities the tile grid depends on. If any of these drift, the tiles and
+// the pin stop agreeing and every guess is quietly off by however much.
+near(Geo.lonToWorldX(-180), 0, 1e-12, "lon -180 is world x 0")
+near(Geo.lonToWorldX(0), 0.5, 1e-12, "lon 0 is world x 0.5")
+near(Geo.latToWorldY(0), 0.5, 1e-12, "the equator is world y 0.5")
+near(Geo.latToWorldY(Geo.MERCATOR_MAX_LAT), 0, 1e-9, "the north edge is world y 0")
+near(Geo.latToWorldY(-Geo.MERCATOR_MAX_LAT), 1, 1e-9, "the south edge is world y 1")
+
+// The world is square at exactly this latitude -- that is what makes it the
+// cutoff every tile scheme uses, and getting it wrong stretches the whole map.
+near(Geo.MERCATOR_MAX_LAT, 85.05112877980659, 1e-9, "the mercator cutoff")
+
+for (let lat = -85; lat <= 85; lat += 5) {
+  near(Geo.worldYToLat(Geo.latToWorldY(lat)), lat, 1e-9, `world y round trip at ${lat}`)
+}
+for (let lon = -180; lon < 180; lon += 15) {
+  near(Geo.worldXToLon(Geo.lonToWorldX(lon)), lon, 1e-9, `world x round trip at ${lon}`)
+}
+
+// sinh is hand-rolled because V4 cannot be relied on to have Math.sinh.
+for (const x of [-3, -1, -0.1, 0, 0.1, 1, 3]) {
+  near(Geo.sinh(x), (Math.exp(x) - Math.exp(-x)) / 2, 1e-12, `sinh at ${x}`)
+}
+
+// Beyond the cutoff, latitude clamps rather than exploding. A pole must still
+// produce a finite pixel, or the marker layer places a pin at NaN and vanishes.
+{
+  const view = { mode: "map", width: 940, height: 330, zoom: 1, centreLat: 0, centreLon: 0 }
+  for (const lat of [90, -90, 89.9, -89.9]) {
+    const p = Geo.project(view, lat, 0)
+    ok(isFinite(p.x) && isFinite(p.y), `a pole still projects finitely (${lat})`,
+       `got x=${p.x} y=${p.y}`)
+  }
+  near(Geo.project(view, 90, 0).y, Geo.project(view, Geo.MERCATOR_MAX_LAT, 0).y, 1e-9,
+       "the north pole clamps to the north edge")
+  near(Geo.project(view, -90, 0).y, Geo.project(view, -Geo.MERCATOR_MAX_LAT, 0).y, 1e-9,
+       "the south pole clamps to the south edge")
+}
+
+// Zooming about a point must leave that point where it was. This is what breaks
+// first if the drag maths and the projection maths ever disagree.
+{
+  for (const zoom of [1, 2.5, 8]) {
+    const view = { mode: "map", width: 940, height: 330, zoom, centreLat: 40, centreLon: -3 }
+    // The anchor is taken from a real coordinate rather than an arbitrary pixel,
+    // because at minimum zoom the world is narrower than the pane and a pixel
+    // chosen by hand can easily land in the background beside it -- where
+    // unproject correctly returns nothing.
+    const anchor = Geo.project(view, 45, 5)
+    const px = anchor.x, py = anchor.y
+    const before = Geo.unproject(view, px, py)
+    const zoomed = Object.assign({}, view, { zoom: zoom * 1.25 })
+    // Re-centre the way GlobeMap.zoomBy does, then confirm the anchor held.
+    const after = Geo.unproject(zoomed, px, py)
+    zoomed.centreLat = Geo.worldYToLat(Geo.clamp(
+      Geo.latToWorldY(zoomed.centreLat) + (Geo.latToWorldY(before.lat) - Geo.latToWorldY(after.lat)), 0, 1))
+    zoomed.centreLon = Geo.wrapLongitude(zoomed.centreLon + (before.lon - after.lon))
+    const held = Geo.unproject(zoomed, px, py)
+    near(Geo.haversineKm(before.lat, before.lon, held.lat, held.lon), 0, 1.0,
+         `zoom anchor holds at z${zoom}`)
+  }
+}
+
+// The flat map must refuse a click off the sheet rather than clamping onto it.
 {
   const view = { mode: "map", width: 900, height: 520, zoom: 1, centreLat: 80, centreLon: 0 }
   ok(Geo.unproject(view, 450, 260) !== null, "map centre is a point")
-  ok(Geo.unproject(view, 450, -400) === null, "above the north pole is not a point")
-  ok(Geo.unproject(view, 450, 2000) === null, "below the south pole is not a point")
+  ok(Geo.unproject(view, 450, -400) === null, "above the top of the world is not a point")
+  ok(Geo.unproject(view, 450, 2000) === null, "below the bottom of the world is not a point")
+}
+
+// One world, not a repeating strip: at minimum zoom the pane is wider than the
+// world, and the background either side of it is not clickable. Two clicks in
+// three would otherwise drop a pin a whole world-width from where they landed.
+{
+  const view = { mode: "map", width: 940, height: 330, zoom: 1, centreLat: 0, centreLon: 0 }
+  const size = Geo.mapWorldSize(view)          // 330
+  const left = view.width / 2 - size / 2       // 305
+  const right = view.width / 2 + size / 2      // 635
+
+  ok(Geo.unproject(view, left + 2, 165) !== null, "just inside the west edge is a point")
+  ok(Geo.unproject(view, right - 2, 165) !== null, "just inside the east edge is a point")
+  ok(Geo.unproject(view, left - 4, 165) === null, "the margin west of the world is not a point")
+  ok(Geo.unproject(view, right + 4, 165) === null, "the margin east of the world is not a point")
+  ok(Geo.unproject(view, 10, 165) === null, "the far left of the pane is not a point")
+  ok(Geo.unproject(view, 930, 165) === null, "the far right of the pane is not a point")
+
+  // The edges themselves still resolve, to the antimeridian on both sides.
+  near(Math.abs(Geo.unproject(view, left, 165).lon), 180, 1e-6, "the west edge is the antimeridian")
+  near(Math.abs(Geo.unproject(view, right, 165).lon), 180, 1e-6, "the east edge is the antimeridian")
+}
+
+// ---------------------------------------------------------------- tile grid
+
+{
+  const view = { mode: "map", width: 940, height: 330, zoom: 1, centreLat: 0, centreLon: 0 }
+  const tiles = Geo.tileGrid(view, 64)
+  ok(tiles.length > 0, "a grid is produced at minimum zoom")
+
+  for (const t of tiles) {
+    ok(Number.isInteger(t.z) && t.z >= 0 && t.z <= 19, "tile z is a valid level", JSON.stringify(t))
+    const n = Math.pow(2, t.z)
+    ok(Number.isInteger(t.x) && t.x >= 0 && t.x < n, "tile x is inside the pyramid", JSON.stringify(t))
+    ok(Number.isInteger(t.y) && t.y >= 0 && t.y < n, "tile y is inside the pyramid", JSON.stringify(t))
+    ok(isFinite(t.sx) && isFinite(t.sy) && t.size > 0, "tile geometry is finite", JSON.stringify(t))
+  }
+
+  // A tile's own top-left corner must land where the projection puts that
+  // corner's coordinate. This is the assertion that the tiles and the pin agree;
+  // if it drifts, every guess is quietly off by however much it drifted.
+  for (const t of tiles) {
+    const n = Math.pow(2, t.z)
+    const lon = Geo.worldXToLon(t.x / n)
+    const lat = Geo.worldYToLat(t.y / n)
+    const p = Geo.project(view, lat, lon)
+    near(p.x, t.sx, 0.001, `tile ${t.z}/${t.x}/${t.y} x agrees with the projection`)
+    near(p.y, t.sy, 0.001, `tile ${t.z}/${t.x}/${t.y} y agrees with the projection`)
+  }
+
+  // The cap bounds what is built, because each entry becomes an Image that
+  // fetches and decodes inside the shell.
+  ok(Geo.tileGrid(view, 3).length <= 3, "the tile cap is honoured")
+  ok(Geo.tileGrid(view, 0).length > 0, "a zero cap falls back to a sane default")
+
+  // Tiles must cover the pane at every zoom the UI can reach, and stay bounded.
+  for (const zoom of [1, 1.4, 2, 3.7, 8, 16, 40]) {
+    const v = { mode: "map", width: 940, height: 330, zoom, centreLat: 48.85, centreLon: 2.29 }
+    const g = Geo.tileGrid(v, 64)
+    ok(g.length > 0 && g.length <= 64, `grid is non-empty and bounded at z${zoom}`,
+       `got ${g.length}`)
+    const px = g[0].size
+    ok(px >= 256 / Math.SQRT2 - 1 && px <= 256 * Math.SQRT2 + 1,
+       `tiles stay near native size at z${zoom}`, `got ${px}`)
+  }
 }
 
 // The back of the globe must report itself invisible, or it paints mirrored

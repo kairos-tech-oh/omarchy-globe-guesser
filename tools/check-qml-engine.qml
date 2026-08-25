@@ -66,6 +66,10 @@ QtObject {
             var projected = GeoMath.project(view, samples[s][0], samples[s][1])
             if (!isFinite(projected.x) || !isFinite(projected.y)) return fail(10)
             if (!projected.visible) continue
+            // Mercator sends the poles to infinity and is cut off at 85.05
+            // degrees instead, so a point beyond that is clamped on the way out
+            // and cannot come back as itself. That is the projection working.
+            if (modes[m] === "map" && Math.abs(samples[s][0]) > GeoMath.MERCATOR_MAX_LAT) continue
             if (projected.x < 0 || projected.x > view.width) continue
             if (projected.y < 0 || projected.y > view.height) continue
             var back = GeoMath.unproject(view, projected.x, projected.y)
@@ -96,9 +100,50 @@ QtObject {
     if (!limb.visible) return fail(15)
     if (GeoMath.unproject(globe, limb.x, limb.y) === null) return fail(15)
 
-    // 16: past the pole on the flat map is not a guess either.
+    // 16: past the edge of the sheet is not a guess either -- neither above the
+    // top of the world nor out in the background beside it.
     var flat = { mode: "map", width: 900, height: 520, zoom: 1, centreLat: 80, centreLon: 0 }
     if (GeoMath.unproject(flat, 450, -400) !== null) return fail(16)
+    var wide = { mode: "map", width: 940, height: 330, zoom: 1, centreLat: 0, centreLon: 0 }
+    if (GeoMath.unproject(wide, 10, 165) !== null) return fail(16)
+    if (GeoMath.unproject(wide, 930, 165) !== null) return fail(16)
+    if (GeoMath.unproject(wide, 470, 165) === null) return fail(16)
+
+    // 17: Mercator, which the flat map and every tile are cut to. Checked here
+    // as well as under Node because sinh is hand-rolled -- V4 cannot be relied
+    // on to provide Math.sinh -- and because Math.log and Math.LN2 decide which
+    // level of the tile pyramid gets asked for.
+    if (Math.abs(GeoMath.latToWorldY(0) - 0.5) > 1e-12) return fail(17)
+    if (Math.abs(GeoMath.lonToWorldX(0) - 0.5) > 1e-12) return fail(17)
+    if (Math.abs(GeoMath.latToWorldY(GeoMath.MERCATOR_MAX_LAT)) > 1e-9) return fail(17)
+    if (Math.abs(GeoMath.latToWorldY(-GeoMath.MERCATOR_MAX_LAT) - 1) > 1e-9) return fail(17)
+    for (var ml = -85; ml <= 85; ml += 5) {
+      if (Math.abs(GeoMath.worldYToLat(GeoMath.latToWorldY(ml)) - ml) > 1e-9) return fail(17)
+    }
+    for (var sx = -3; sx <= 3; sx += 1) {
+      if (Math.abs(GeoMath.sinh(sx) - (Math.exp(sx) - Math.exp(-sx)) / 2) > 1e-12) return fail(18)
+    }
+
+    // 19: the tile grid. Every index must be an integer inside the pyramid, and
+    // every tile's own corner must land where the projection puts that corner's
+    // coordinate -- that identity is the only thing keeping the tiles and the
+    // pin from drifting apart, and a guess is only as accurate as it holds.
+    var mapView = { mode: "map", width: 940, height: 330, zoom: 1, centreLat: 0, centreLon: 0 }
+    var grid = GeoMath.tileGrid(mapView, 64)
+    if (!grid || grid.length === 0 || grid.length > 64) return fail(19)
+    for (var t = 0; t < grid.length; t++) {
+      var tile = grid[t]
+      var span = Math.pow(2, tile.z)
+      if (tile.z !== Math.floor(tile.z) || tile.z < 0 || tile.z > 19) return fail(19)
+      if (tile.x !== Math.floor(tile.x) || tile.x < 0 || tile.x >= span) return fail(19)
+      if (tile.y !== Math.floor(tile.y) || tile.y < 0 || tile.y >= span) return fail(19)
+      if (!isFinite(tile.sx) || !isFinite(tile.sy) || !(tile.size > 0)) return fail(19)
+      var corner = GeoMath.project(mapView,
+          GeoMath.worldYToLat(tile.y / span), GeoMath.worldXToLon(tile.x / span))
+      if (Math.abs(corner.x - tile.sx) > 0.001) return fail(19)
+      if (Math.abs(corner.y - tile.sy) > 0.001) return fail(19)
+    }
+    if (GeoMath.tileGrid(mapView, 3).length > 3) return fail(19)
 
     // 20-29: distance and scoring.
     if (Math.abs(GeoMath.haversineKm(0, 0, 0, 0)) > 1e-9) return fail(20)
