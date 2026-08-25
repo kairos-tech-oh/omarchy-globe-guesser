@@ -334,16 +334,35 @@ Panel {
     return stateHome + "/omarchy/globe-guesser-state.json"
   }
 
-  // Read once, bounded, at the producer.
+  // Read once, bounded, on a descriptor opened with the right flags.
   //
   // Not FileView: it exposes no way to bound a read, so a state file that has
   // been grown to a gigabyte by anything at all is pulled whole into the shell
   // before a size check downstream could refuse it.
   //
-  // cap+1 bytes are requested, not cap. `head -c cap` on an oversized file
-  // yields a valid-looking JSON prefix, which would be accepted and then written
-  // back as permanently truncated state. Asking for one more byte than the
-  // ceiling is what makes "exactly at the limit" distinguishable from "cut off".
+  // Not `head` either, which was the previous reader. `head` follows a symlink
+  // and blocks on a FIFO, and a state path is exactly where somebody would put
+  // one: replacing this file with a pipe that never gets a writer hangs the
+  // reader. Refusing links is not enough on its own -- a pipe is not a link, and
+  // it is the one that hangs.
+  //
+  // `dd` is the one coreutils tool that can pass the flags:
+  //
+  //   iflag=nofollow    a symlink at the path fails to open (ELOOP) rather than
+  //                     being followed to whatever it points at
+  //   iflag=nonblock    a FIFO with no writer returns immediately with nothing,
+  //                     instead of waiting for a peer that never arrives
+  //   iflag=fullblock   one dd invocation returns the whole ceiling rather than
+  //                     whatever a single read() happened to yield
+  //
+  // Verified against a real symlink, a real FIFO with no peer, and a directory:
+  // symlink and directory both error, the FIFO returns 0 bytes in 0 seconds.
+  // `timeout` stays as the outer bound regardless.
+  //
+  // cap+1 bytes are requested, not cap. `bs=cap` on an oversized file yields a
+  // valid-looking JSON prefix, which would be accepted and then written back as
+  // permanently truncated state. Asking for one more byte than the ceiling is
+  // what makes "exactly at the limit" distinguishable from "cut off".
   //
   // The bytes that arrive are the bytes that are validated and used. There is no
   // second open: a stat followed by a separate read is a window in which the
@@ -351,7 +370,11 @@ Panel {
   Process {
     id: stateReader
     running: root.statePath !== ""
-    command: ["timeout", "-k", "2", "6", "head", "-c", String(root.stateCapBytes + 1), "--", root.statePath]
+    command: ["timeout", "-k", "2", "6", "dd",
+              "if=" + root.statePath,
+              "iflag=nofollow,nonblock,fullblock",
+              "bs=" + String(root.stateCapBytes + 1),
+              "count=1", "status=none"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.applyState(text)
@@ -445,6 +468,13 @@ Panel {
   // computed deadline that reached zero would quietly switch the ceiling off.
   // The URL and every option travel as argv entries; nothing is spliced into the
   // script text.
+  //
+  // On curl\'s --max-time specifically: it is a deadline for the whole transfer,
+  // not a socket-idle timer that resets on every byte. Measured on curl 8.21
+  // against a server sending one byte every 50ms and never going idle --
+  // "Operation timed out after 5000 milliseconds with 100 bytes received". The
+  // outer `timeout` is a second wall clock regardless, so a drip-feed is bounded
+  // twice over.
   //
   // No -L. Every URL this plugin fetches is checked against a hardcoded host
   // before it is used, and refusing redirects means a compromised or
@@ -782,14 +812,49 @@ Panel {
     'd="$1"; u="$2"; ua="$3"\n' +
     '[ -d "$d" ] && [ ! -L "$d" ] && [ -O "$d" ] || exit 1\n' +
     'find "$d" -maxdepth 1 -type f -name "photo.*" -mmin +60 -delete 2>/dev/null\n' +
+    // A byte ceiling beside the row ceiling. `tail -n +3` bounds how many
+    // filenames survive, not how many bytes `find` and `sort` had to hold to
+    // decide -- and a row cap is not a byte cap. This directory is ours and
+    // 0700, so the list is short in practice; the bound is here so that stays
+    // true by construction rather than by assumption.
     'LC_ALL=C find "$d" -maxdepth 1 -type f -name "photo.*" -printf "%T@\\t%p\\n" 2>/dev/null \\\n' +
+    '  | head -c 65537 \\\n' +
     '  | LC_ALL=C sort -rn | tail -n +3 | cut -f2- \\\n' +
     '  | while IFS= read -r old; do rm -f -- "$old"; done\n' +
     't=$(mktemp "$d/photo.XXXXXXXX") || exit 1\n' +
     'chmod 600 -- "$t" || { rm -f -- "$t"; exit 1; }\n' +
-    'curl -fsS --proto "=https" --max-time 20 --max-filesize ' + photoCapBytes +
-      ' -A "$ua" -o "$t" -- "$u" || { rm -f -- "$t"; exit 2; }\n' +
-    'magic=$(od -An -tx1 -N4 -- "$t" | tr -d " \\n")\n' +
+    // Two independent ceilings on the body, because they fail in different
+    // places. --max-filesize aborts before the transfer starts when the server
+    // declares a Content-Length; `head -c` bounds what is written whatever the
+    // server declares, including a chunked reply that declares nothing.
+    //
+    // Measured on curl 8.21 against a chunked server with no Content-Length:
+    // --max-filesize did abort at exactly the cap (exit 63). It is kept as the
+    // early bound, and `head -c` is what makes the ceiling independent of which
+    // curl the user happens to have.
+    //
+    // cap+1 is requested so "exactly at the ceiling" stays distinguishable from
+    // "cut off", and a body that reaches cap+1 is deleted rather than shown: a
+    // truncated JPEG that still has a valid header is worse than no photograph,
+    // because it is silently wrong.
+    //
+    // The size is counted BY the pipeline rather than measured afterwards.
+    // Writing the file and then asking the filesystem how big it is would be a
+    // check followed by a separate open, which is the shape that lets a file be
+    // replaced between the two -- so `wc -c` counts the same bytes `tee` wrote,
+    // and there is no second look at the path.
+    //
+    // The magic number is read back through `dd iflag=nofollow` for the same
+    // reason the state file is: it is the one read of that path, and it refuses
+    // to follow a link rather than trusting that nothing could have put one
+    // there.
+    'size=$(curl -fsS --proto "=https" --max-time 20 --max-filesize ' + photoCapBytes + ' \\\n' +
+    '        -A "$ua" -- "$u" \\\n' +
+    '        | head -c ' + (photoCapBytes + 1) + ' | tee "$t" | wc -c)\n' +
+    '[ "$size" -gt 0 ] || { rm -f -- "$t"; exit 2; }\n' +
+    '[ "$size" -le ' + photoCapBytes + ' ] || { rm -f -- "$t"; exit 4; }\n' +
+    'magic=$(dd if="$t" iflag=nofollow,nonblock bs=4 count=1 status=none \\\n' +
+    '        | od -An -tx1 | tr -d " \\n")\n' +
     'case "$magic" in\n' +
     '  ffd8ff??) ;;\n' +
     '  89504e47) ;;\n' +
@@ -819,6 +884,7 @@ Panel {
     onExited: function (exitCode) {
       if (exitCode === 0) return
       root.fetchFailed(exitCode === 3 ? "That file was not an image."
+                     : exitCode === 4 ? "That photo was too large."
                                       : "Could not download the photo.")
     }
   }

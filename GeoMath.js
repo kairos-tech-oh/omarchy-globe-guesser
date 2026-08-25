@@ -325,6 +325,33 @@ function unprojectGlobe(view, x, y) {
   return { lat: latitude, lon: wrapLongitude(longitude) }
 }
 
+// The one URL this plugin hands to Image.source.
+//
+// The host and the style are literals here; only the three numbers vary, and all
+// three are re-derived as integers inside the pyramid before they are used. That
+// is deliberate belt-and-braces: tileGrid already produces integers and both
+// check suites assert it, but `source:` is a URL sink that fetches, and a sink
+// should not depend on a caller elsewhere in the repo continuing to be careful.
+//
+// Anything that is not a whole number in range yields "" -- and an Image with an
+// empty source fetches nothing.
+//
+// Provider note: CARTO, not tile.openstreetmap.org. The OSM Foundation's tile
+// usage policy forbids distributing an application that draws on their servers.
+var TILE_HOST = "https://basemaps.cartocdn.com"
+var TILE_STYLE = "dark_all"
+
+function tileUrl(z, x, y) {
+  var level = Math.floor(Number(z))
+  var col = Math.floor(Number(x))
+  var row = Math.floor(Number(y))
+  if (!isFinite(level) || level < 0 || level > MAX_TILE_ZOOM) return ""
+  var span = Math.pow(2, level)
+  if (!isFinite(col) || col < 0 || col >= span) return ""
+  if (!isFinite(row) || row < 0 || row >= span) return ""
+  return TILE_HOST + "/" + TILE_STYLE + "/" + level + "/" + col + "/" + row + ".png"
+}
+
 // ------------------------------------------------------------- the interface
 
 function project(view, latitude, longitude) {

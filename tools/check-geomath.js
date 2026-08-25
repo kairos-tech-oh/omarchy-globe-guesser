@@ -298,6 +298,76 @@ for (const x of [-3, -1, -0.1, 0, 0.1, 1, 3]) {
   ok(Geo.project(view, 0, 89).visible === true, "just inside the limb is visible")
 }
 
+// ------------------------------------------------------- url sinks
+
+// tileUrl and localFileUrl are the two guards standing in front of an
+// Image.source, which is a URL sink that fetches. Both are exercised here rather
+// than left to the QML, because a validator nothing tests is a validator that
+// quietly stops validating.
+{
+  const good = Geo.tileUrl(5, 16, 10)
+  ok(good === "https://basemaps.cartocdn.com/dark_all/5/16/10.png",
+     "a valid tile builds the expected url", good)
+
+  // Out of the pyramid, in every direction.
+  ok(Geo.tileUrl(-1, 0, 0) === "", "negative zoom is refused")
+  ok(Geo.tileUrl(20, 0, 0) === "", "zoom past the deepest level is refused")
+  ok(Geo.tileUrl(5, -1, 0) === "", "negative column is refused")
+  ok(Geo.tileUrl(5, 32, 0) === "", "column past the edge is refused")
+  ok(Geo.tileUrl(5, 0, -1) === "", "negative row is refused")
+  ok(Geo.tileUrl(5, 0, 32) === "", "row past the edge is refused")
+
+  // Not numbers at all. These are what a sink has to survive if anything ever
+  // reaches it that tileGrid did not produce.
+  for (const bad of [NaN, Infinity, -Infinity, undefined, null, "5", "../../etc",
+                     "0/../../x", {}, []]) {
+    const out = Geo.tileUrl(bad, 0, 0)
+    ok(out === "" || out.indexOf("https://basemaps.cartocdn.com/dark_all/") === 0,
+       `tileUrl never emits anything but its own host (${String(bad)})`, out)
+    ok(out.indexOf("..") === -1, `tileUrl never emits traversal (${String(bad)})`, out)
+  }
+  // A string that would concatenate into a path escape must not survive.
+  ok(Geo.tileUrl(5, "0/../../evil", 0) === "", "a path-shaped column is refused")
+
+  // Every grid the UI can produce must build a usable url.
+  for (const zoom of [1, 2, 8, 64, 4096]) {
+    const v = { mode: "map", width: 940, height: 590, zoom, centreLat: 20, centreLon: 5 }
+    for (const t of Geo.tileGrid(v, 64)) {
+      const url = Geo.tileUrl(t.z, t.x, t.y)
+      ok(url.indexOf("https://basemaps.cartocdn.com/dark_all/") === 0,
+         `every real tile builds a url at z${zoom}`, url)
+    }
+  }
+}
+
+{
+  ok(Safe.localFileUrl("/run/user/1000/omarchy-globe-guesser/photo.aB3xY9zQ")
+       === "file:///run/user/1000/omarchy-globe-guesser/photo.aB3xY9zQ",
+     "a real cache path becomes a file url")
+
+  ok(Safe.localFileUrl("") === "", "empty is empty")
+  ok(Safe.localFileUrl(null) === "", "null is empty")
+  ok(Safe.localFileUrl(undefined) === "", "undefined is empty")
+  ok(Safe.localFileUrl("relative/path.jpg") === "", "a relative path is refused")
+
+  // The sinks that make this matter: image:// reaches providers inside the shell.
+  ok(Safe.localFileUrl("image://provider/x") === "", "an image:// url is refused")
+  ok(Safe.localFileUrl("http://example.invalid/x.png") === "", "an http url is refused")
+  ok(Safe.localFileUrl("file:///etc/passwd") === "", "a file:// url is refused")
+  ok(Safe.localFileUrl("/run/user/1000/../../../etc/passwd") === "", "traversal is refused")
+  ok(Safe.localFileUrl("/x" + String.fromCharCode(10) + "/y") === "", "a newline is refused")
+  ok(Safe.localFileUrl("/x" + String.fromCharCode(0)) === "", "a NUL is refused")
+  ok(Safe.localFileUrl("/" + "a".repeat(5000)) === "", "an absurd length is refused")
+
+  // Whatever it returns is either nothing or a file url -- never another scheme.
+  for (const bad of ["image://x", "qrc:/x", "//host/x", "\\\\host\\share",
+                     "/ok/path", "", "..", "/a/../b"]) {
+    const out = Safe.localFileUrl(bad)
+    ok(out === "" || out.indexOf("file:///") === 0,
+       `localFileUrl only ever emits file:// (${bad})`, out)
+  }
+}
+
 // ------------------------------------------------------------------ distance
 
 near(Geo.haversineKm(0, 0, 0, 0), 0, 1e-9, "zero distance")

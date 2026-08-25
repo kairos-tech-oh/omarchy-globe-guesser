@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -66,6 +67,47 @@ CACHE = Path(os.environ.get("XDG_CACHE_HOME")
                  or (Path.home() / ".cache")) / "omarchy-globe-guesser-build"
 
 
+# Natural Earth's GeoJSON runs to 3.4 MB; 64 MB is nearly twenty times the
+# largest input and still a hard bound.
+MAX_INPUT_BYTES = 64 * 1024 * 1024
+
+# Wall clock for the whole body, not a socket timeout.
+BODY_DEADLINE_SEC = 180
+
+
+def _read_bounded(url: str) -> bytes:
+    """Fetch one input under a byte ceiling and a wall-clock deadline.
+
+    urlopen's `timeout=` is a SOCKET timeout: it resets on every byte, so a
+    server dripping one byte every 50ms never goes idle and holds the connection
+    open forever. The deadline here is monotonic and bounds the whole body.
+
+    The byte ceiling is separate, because a timeout bounds duration and not
+    bytes -- at line rate three minutes is a great deal of memory. Reaching the
+    ceiling fails closed rather than returning a truncated file, which would
+    then be measured against the digest and produce a confusing mismatch instead
+    of a clear refusal.
+
+    This is build-time code and never ships in the running plugin, but it is in
+    the reviewed snapshot and the same rules are the right ones.
+    """
+    deadline = time.monotonic() + BODY_DEADLINE_SEC
+    chunks: list[bytes] = []
+    total = 0
+    with urllib.request.urlopen(url, timeout=30) as response:
+        while True:
+            if time.monotonic() > deadline:
+                raise SystemExit(f"body deadline exceeded fetching {url}")
+            chunk = response.read(65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_INPUT_BYTES:
+                raise SystemExit(f"input exceeded {MAX_INPUT_BYTES} bytes: {url}")
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def fetch(name: str) -> bytes:
     """Return the verified bytes of one upstream input.
 
@@ -79,8 +121,7 @@ def fetch(name: str) -> bytes:
     else:
         url = RAW % (COMMIT, name)
         print(f"  fetching {name} at {COMMIT[:12]}...", file=sys.stderr)
-        with urllib.request.urlopen(url, timeout=120) as response:
-            raw = response.read()
+        raw = _read_bounded(url)
         path.write_bytes(raw)
 
     got = hashlib.sha256(raw).hexdigest()

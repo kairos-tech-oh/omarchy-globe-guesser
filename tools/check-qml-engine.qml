@@ -145,6 +145,30 @@ QtObject {
     }
     if (GeoMath.tileGrid(mapView, 3).length > 3) return fail(19)
 
+    // 19b: the two guards standing in front of Image.source. Checked under V4
+    // as well as Node because both are regex- and Number()-driven, and V4 is the
+    // engine that actually decides whether the shell fetches something.
+    if (GeoMath.tileUrl(5, 16, 10) !== "https://basemaps.cartocdn.com/dark_all/5/16/10.png")
+      return fail(190)
+    if (GeoMath.tileUrl(-1, 0, 0) !== "") return fail(191)
+    if (GeoMath.tileUrl(20, 0, 0) !== "") return fail(191)
+    if (GeoMath.tileUrl(5, 32, 0) !== "") return fail(191)
+    if (GeoMath.tileUrl(5, 0, 32) !== "") return fail(191)
+    if (GeoMath.tileUrl(NaN, 0, 0) !== "") return fail(192)
+    if (GeoMath.tileUrl(5, "0/../../evil", 0) !== "") return fail(192)
+    if (GeoMath.tileUrl(5, 16, 10).indexOf("..") >= 0) return fail(192)
+
+    if (Sanitise.localFileUrl("/run/user/1000/omarchy-globe-guesser/photo.aB3xY9zQ")
+        !== "file:///run/user/1000/omarchy-globe-guesser/photo.aB3xY9zQ") return fail(193)
+    if (Sanitise.localFileUrl("image://provider/x") !== "") return fail(194)
+    if (Sanitise.localFileUrl("http://example.invalid/x.png") !== "") return fail(194)
+    if (Sanitise.localFileUrl("file:///etc/passwd") !== "") return fail(194)
+    if (Sanitise.localFileUrl("relative/x.jpg") !== "") return fail(194)
+    if (Sanitise.localFileUrl("/a/../../etc/passwd") !== "") return fail(194)
+    if (Sanitise.localFileUrl("/x" + String.fromCharCode(10) + "/y") !== "") return fail(194)
+    if (Sanitise.localFileUrl("") !== "") return fail(194)
+    if (Sanitise.localFileUrl(null) !== "") return fail(194)
+
     // 20-29: distance and scoring.
     if (Math.abs(GeoMath.haversineKm(0, 0, 0, 0)) > 1e-9) return fail(20)
     if (Math.abs(GeoMath.haversineKm(51.5074, -0.1278, 40.7128, -74.006) - 5570) > 15) return fail(21)

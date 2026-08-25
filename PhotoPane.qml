@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Effects
 import qs.Commons
+import "Sanitise.js" as Sanitise
 
 // The photo half of the board.
 //
@@ -38,7 +39,11 @@ Item {
   property color background: Color.popups.background
 
   readonly property bool ready: image.status === Image.Ready
-  readonly property url photoSource: root.photoPath === "" ? "" : "file://" + root.photoPath
+
+  // Built through Sanitise.localFileUrl rather than concatenated here, so the
+  // guard on this sink is covered by the check suites like every other boundary
+  // function. See that function for what it refuses and why.
+  readonly property url photoSource: Sanitise.localFileUrl(root.photoPath)
 
   Rectangle {
     anchors.fill: parent

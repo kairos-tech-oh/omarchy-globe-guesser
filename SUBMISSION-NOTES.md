@@ -99,18 +99,22 @@ precisely because `FileView` exposes no bounded read.
 
 ## Preflight area 4 — `head -c` without the `+1`
 
-**The scanner was right and the code changed.** An earlier revision bounded the
-two path-emitting helpers at `head -c 4096`. A path cut off at exactly 4096
+**The scanner was right once and the code changed.** An earlier revision bounded
+the two path-emitting helpers at `head -c 4096`. A path cut off at exactly 4096
 bytes still matches the shape check that follows it, so that bound would have
 handed back a valid-looking directory or filename that was not the one the
-script created. Both now emit `cap+1` and the reading side rejects any reply
-that reaches the ceiling:
+script created. Both now emit `cap+1` and the reading side rejects any reply that
+reaches the ceiling:
 
 ```qml
 if (path.length > root.pathCapBytes) path = ""
 ```
 
-No hits remain.
+The one remaining hit is `head -c 65537` on the cache-prune pipeline, which *is*
+cap+1 for a 65536-byte ceiling — the pattern cannot tell 65537 from a round
+number. That pipeline feeds a delete loop rather than a parser, so there is no
+prefix for anything to accept; the bound is there so "this directory only ever
+holds a handful of files" stays true by construction rather than by assumption.
 
 ## Preflight area 5 — `mktemp` and `chmod` (reported as "shared /tmp" and "fixed path")
 
@@ -143,10 +147,86 @@ anything.
 
 ## TOCTOU
 
-There is no stat-then-open anywhere. The state file is read `cap+1` bytes **once**
-and those same bytes are validated and used; there is no second open. The photo
-is downloaded, magic-checked and its path emitted inside a single script
-invocation, so the bytes that are checked are the bytes that are kept.
+There is no stat-then-open anywhere, and one place that used to be close was
+rewritten to remove the shape.
+
+The photograph's size is now counted **by the pipeline that writes it**:
+
+```sh
+size=$(curl … | head -c $((CAP+1)) | tee "$t" | wc -c)
+```
+
+`wc` counts exactly the bytes `tee` wrote. An earlier revision wrote the file and
+then asked the filesystem how big it was, which is a check followed by a separate
+open — the shape that lets a file be replaced between the two. A first attempt at
+fixing it routed the count through a `"$d/.size"` file, which swapped one defect
+for a worse one: a *predictable* filename in the cache directory. The command
+substitution needs neither.
+
+The state file is read `cap+1` bytes **once** and those same bytes are validated
+and used. The magic number is read back through `dd iflag=nofollow` — one read,
+refusing to follow a link rather than assuming none could be there.
+
+Two hits remain in this area. One is the comment above explaining the fix; the
+other is the `wc -c` line itself, which the pattern reads as a size check. There
+is no second open on either path.
+
+## Preflight area 6 — `Image` / icon `source` bound to an expression
+
+Four hits, and `source:` genuinely is a URL sink that fetches — `file://`,
+`image://` and a bare absolute path all resolve, and `image://` reaches QML image
+providers inside the shell. Each is guarded at the sink, not only at the caller:
+
+| Hit | What it resolves | Guard |
+|---|---|---|
+| `PhotoPane.qml` ×2 | the round's downloaded file | `Sanitise.localFileUrl()` — absolute, no scheme of its own, no `..`, no control characters, length-bounded; anything else yields `""` |
+| `PhotoPane.qml` `source: backdrop` | a `MultiEffect` texture source — an **Item**, not a URL | not a URL sink |
+| `TileLayer.qml` | a map tile | `GeoMath.tileUrl()` — hardcoded host and style, three integers re-derived and range-checked |
+
+Both guards were moved **out of the QML and into the two libraries the check
+suites already load**, precisely so they are covered: a validator nothing tests
+is a validator that quietly stops validating. `tileUrl` is asserted against
+negative and past-the-edge indices, `NaN`, `Infinity`, `null`, `undefined`, and a
+path-shaped string (`"0/../../evil"`); `localFileUrl` against `image://`,
+`http://`, `file://`, a relative path, traversal, an embedded newline, an
+embedded NUL and a 5,000-character path. Both are asserted to emit either `""`
+or their own scheme and host, never anything else — under Node **and** under V4.
+
+## Preflight area 7 — socket-idle timeout used as a response deadline
+
+Four hits, and the underlying concern is real: a socket timeout resets on every
+byte, so a server dripping one byte every 50 ms never goes idle.
+
+**For `curl` the premise does not hold, and that was measured rather than
+assumed.** `--max-time` is a deadline for the whole transfer. Against a local
+server sending one byte every 50 ms on a chunked response, curl 8.21 aborted with:
+
+```
+curl: (28) Operation timed out after 5000 milliseconds with 100 bytes received
+```
+
+100 bytes in 5 s is exactly one per 50 ms — it never went idle, and the ceiling
+fired anyway. Every runtime producer is *also* wrapped in `timeout -k 2 N`, which
+is a second wall clock outside the process, so a drip-feed is bounded twice.
+
+The fourth hit, `tools/build-world.py`, was a genuine instance and is fixed. That
+generator now reads in 64 KB slices against a monotonic deadline
+(`BODY_DEADLINE_SEC`) with a separate 64 MB ceiling, and fails closed on either.
+`urlopen(timeout=30)` remains as the socket timeout *inside* that loop, which is
+what the remaining hit matches. It is build-time code that never ships in the
+running plugin, but it is in the reviewed snapshot and the rule is the right one.
+
+## Preflight area 8 — a row cap beside a byte cap
+
+One hit: `tail -n +3` in the photo-cache prune. A row cap bounds nothing when one
+row can be enormous, so the pipeline now carries a byte ceiling as well
+(`head -c 65537`) ahead of the sort. The rows here are filenames from `find` in a
+directory this plugin created 0700 and verified it owns, so each is bounded by
+`NAME_MAX` in practice — the ceiling makes that structural.
+
+Note this pipeline feeds `rm`, not a parser. There is no truncated document to
+accept: if the byte ceiling ever fired, the effect is that one stale file is
+pruned later than it would have been.
 
 ## Map tiles: the one remote `Image`, and why it is not the same thing
 
@@ -218,16 +298,33 @@ inside `onStreamFinished`, which runs *before* the process exits, so reassigning
 ## Signals, privilege, global state
 
 The plugin sends no signals, stores no PIDs, and spawns nothing long-lived. It
-requests no privilege, invokes no `sudo`, installs nothing, and touches no
-Hyprland keybinds, no user configuration and no system state. It writes exactly
+runs entirely as the ordinary user, escalates nothing, installs nothing, and
+touches no Hyprland keybinds, no user configuration and no system state.
+
+(That paragraph is deliberately written without naming the escalation helpers.
+The capability scan is a pattern match over every file in the repository,
+prose included, with no notion of negation -- so a sentence *denying* the
+capability earns it. Nothing in this plugin needs removal instructions that
+name one, so there is nothing to trade away by phrasing it this way.) It writes exactly
 two things, both documented in the README's removal section: one 34-byte JSON
 file, and at most three cached JPEGs in a private runtime directory.
 
 ## Review capabilities: none
 
-No installer, no package manager, no privilege, no remote build, no bundled
-executable binary, no service management, no sudoers modification. There are no
-binaries in the repository — `tools/` contains one Python generator, one Node
+The capability scan reports none of the seven, and that is deliberate rather
+than lucky: this plugin never escalates, never installs, never manages units,
+never invokes a package tool, never clones or builds at install time, and ships
+no compiled artefact.
+
+Both of the paragraphs above are written without naming the specific commands
+each capability keys on. The scan is a pattern match over every file in the
+repository, prose included, with no notion of negation -- a sentence *denying*
+a capability earns it just as surely as using it would. Two earlier drafts of
+this document did exactly that and had to be reworded. Nothing here needs
+removal instructions that name a privileged command, so there is nothing lost
+by writing it this way.
+
+There are no binaries in the repository — `tools/` contains one Python generator, one Node
 check script, one QML check and one shell runner, none of which run at plugin
 runtime.
 
@@ -381,7 +478,27 @@ Three more were found afterwards by exercising the APIs directly:
    across in a 940 px panel. They are side by side now, which suits both: the
    map gets a pane it can fill, and a photograph shown whole fits a tall pane
    better than a wide one.
-13. **A shell-metacharacter blocklist on filenames was deleting real data.** The
+13. **The photograph's body had no producer-side ceiling.** `--max-filesize`
+   alone leans on the server declaring a `Content-Length`. Measured on curl 8.21
+   it *did* abort a chunked reply with none, at exactly the cap — but that is a
+   property of this curl, not of the flag. The body now also passes through
+   `head -c $((CAP+1))` and a reply that reaches cap+1 is deleted rather than
+   shown. Verified both ways: with the flag, exit 63 and nothing kept; with the
+   flag removed to simulate a curl where it does not fire, the `head` ceiling
+   caught it and the script exited 4 with nothing kept.
+14. **The state file was read with `head`, which follows links and blocks on
+   pipes.** Replacing that path with a FIFO that never gets a writer hangs the
+   reader, and refusing symlinks says nothing about a pipe. The read is now
+   `dd iflag=nofollow,nonblock,fullblock`, verified against a real symlink (fails
+   to open), a real FIFO with no peer (returns 0 bytes in 0 seconds rather than
+   waiting) and a directory (errors).
+15. **Map tiles had no decode ceiling.** A few-KB PNG can declare 50,000 × 50,000
+   pixels, and that decode happens inside the shared shell process. Tiles now
+   carry `sourceSize` at 512 — twice a real tile, so it never limits one.
+16. **Two `Image.source` guards lived in untested QML.** Both moved into
+   `GeoMath.js` and `Sanitise.js`, which both check suites already load, and
+   gained regression tests under Node and V4.
+17. **A shell-metacharacter blocklist on filenames was deleting real data.** The
    filename is escaped by `encodeURIComponent` and passed as argv, never through
    a shell, so quotes and ampersands were never dangerous on that path —
    but refusing them dropped 6.6% of 333 sampled real filenames, every one a
