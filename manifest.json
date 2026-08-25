@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "id": "kairos.globe-guesser",
+  "name": "Globe Guesser",
+  "version": "1.0.0",
+  "author": "kairos",
+  "license": "MIT",
+  "description": "Guess where in the world a photo was taken. Five rounds, a clickable world map and a spinnable globe, and photos from Wikimedia Commons. The map is bundled and works offline.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Globe Guesser",
+    "description": "Guess where a photo was taken, on a map or a globe",
+    "category": "Fun",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "difficulty": "normal",
+      "roundsPerGame": 5,
+      "defaultView": "map",
+      "searchRadiusKm": 10
+    },
+    "schema": [
+      {
+        "key": "difficulty",
+        "type": "enum",
+        "label": "Difficulty",
+        "options": ["easy", "normal", "hard"],
+        "defaultValue": "normal",
+        "description": "Which cities a round can be drawn from. Easy uses the 150 largest in the world, normal the largest 500, hard all 1000 - including places you have very likely never heard of."
+      },
+      {
+        "key": "roundsPerGame",
+        "type": "integer",
+        "label": "Rounds per game",
+        "min": 3,
+        "max": 10,
+        "step": 1,
+        "defaultValue": 5,
+        "description": "How many photos make up one game. Five is the classic run, worth 25,000 points."
+      },
+      {
+        "key": "defaultView",
+        "type": "enum",
+        "label": "Starting view",
+        "options": ["map", "globe"],
+        "defaultValue": "map",
+        "description": "Whether a round opens on the flat world map or the globe. You can switch at any time during a round; this only sets which one you start on."
+      },
+      {
+        "key": "searchRadiusKm",
+        "type": "integer",
+        "label": "Photo radius (km)",
+        "min": 5,
+        "max": 50,
+        "step": 5,
+        "defaultValue": 10,
+        "description": "How far from a city centre a photo may have been taken. Larger widens the pool and finds more countryside; smaller keeps photos recognisably in the city."
+      }
+    ]
+  }
+}
