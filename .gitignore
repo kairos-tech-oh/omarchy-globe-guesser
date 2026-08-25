@@ -1,0 +1,6 @@
+# Scratch renders and extracted helper scripts from tools/. The committed
+# preview.png at the repo root is the marketplace card image and is tracked
+# deliberately.
+tools/*.sh.out
+*.qmlc
+*.jsc
