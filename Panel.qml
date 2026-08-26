@@ -110,6 +110,50 @@ Panel {
   // is enforced by curl itself, before the bytes are written.
   readonly property int photoCapBytes: 6000000
 
+  // A ceiling on the DECODE. This is a different quantity from the one above and
+  // is not bounded by it.
+  //
+  // A PNG stores its pixel count in the header and its pixels compressed, so the
+  // two numbers are unrelated: a 61 KiB file can declare 8000x8000 and cost
+  // hundreds of megabytes the moment anything decodes it. Image.sourceSize does
+  // not prevent that. Qt scales DURING load for JPEG only; for every other
+  // format it loads the source at full size and scales afterwards, so the peak
+  // has already been paid by the time sourceSize applies.
+  //
+  // Measured under Qml Runtime 6.11.1, each file loaded into an Image with
+  // sourceSize 320x240 -- exactly what PhotoPane.qml sets -- peak RSS of the
+  // process:
+  //
+  //     256x256 PNG      141 B     75.2 MiB   the runtime's own floor
+  //   8000x8000 JPEG     244 KiB   79.4 MiB   scaled during load, +4 MiB
+  //   8000x8000 PNG       61 KiB  439.6 MiB   full source first, +364 MiB
+  //   8000x8000 RGBA     243 KiB  562.7 MiB   full source first, +487 MiB
+  //
+  // Qt 6 does carry a global QImageReader allocation limit, and it is not a
+  // substitute for this check. A 20000x20000 grayscale PNG was refused by it,
+  // but all three 8000x8000 files above loaded successfully -- the limit sits
+  // high enough that half a gigabyte inside the shared shell process is
+  // reachable without tripping it, and a plugin cannot lower it without changing
+  // a global that every other consumer in the shell also reads.
+  //
+  // So the header is read and the dimensions checked before the file is handed
+  // to a decoder at all.
+  //
+  // The ceiling is set from measured replies rather than guessed. pithumbsize
+  // caps the WIDTH at 1280 and leaves the height to the aspect ratio, so a tall
+  // photograph is the large case: a real lead image measured here was 1280x2132,
+  // which is 2.7 megapixels. Eight megapixels is roughly three times that and
+  // still bounds a decode at about 32 MiB -- against the 562 MiB a hostile file
+  // reached above, and well under the point where Qt's own limit would have to
+  // catch it.
+  //
+  // The per-side bound is the looser of the two on purpose. Width is already
+  // held to 1280 by the request, so 8192 a side never rejects a real photograph;
+  // its job is to keep both operands small enough that the pixel product below
+  // cannot overflow, and the pixel count is what actually bounds the memory.
+  readonly property int photoMaxDim: 8192
+  readonly property int photoMaxPixels: 8388608
+
   // How many candidate photos are retained from one reply. ggslimit is a
   // request, not a guarantee, so the list is cut before QML holds it.
   //
@@ -844,20 +888,49 @@ Panel {
     // replaced between the two -- so `wc -c` counts the same bytes `tee` wrote,
     // and there is no second look at the path.
     //
-    // The magic number is read back through `dd iflag=nofollow` for the same
-    // reason the state file is: it is the one read of that path, and it refuses
-    // to follow a link rather than trusting that nothing could have put one
-    // there.
+    // The header is read back through `dd iflag=nofollow` for the same reason
+    // the state file is: it is the one read of that path, and it refuses to
+    // follow a link rather than trusting that nothing could have put one there.
+    //
+    // Thirty-two bytes, not four. The first four still decide the format, but a
+    // PNG's declared width and height live at bytes 16..23 and they are what
+    // actually bounds the decode -- see photoMaxPixels for the measurements and
+    // for why Image.sourceSize does not. One read covers both questions, so the
+    // bytes that decide the format are the same bytes that decide the size.
+    //
+    // `od -v` matters: without it od collapses a run of identical input lines to
+    // a `*`, and a 32-byte window of a PNG can easily hold one. The collapsed
+    // output would not match either arm below and every image would be refused.
     'size=$(curl -fsS --proto "=https" --max-time 20 --max-filesize ' + photoCapBytes + ' \\\n' +
     '        -A "$ua" -- "$u" \\\n' +
     '        | head -c ' + (photoCapBytes + 1) + ' | tee "$t" | wc -c)\n' +
     '[ "$size" -gt 0 ] || { rm -f -- "$t"; exit 2; }\n' +
     '[ "$size" -le ' + photoCapBytes + ' ] || { rm -f -- "$t"; exit 4; }\n' +
-    'magic=$(dd if="$t" iflag=nofollow,nonblock bs=4 count=1 status=none \\\n' +
-    '        | od -An -tx1 | tr -d " \\n")\n' +
-    'case "$magic" in\n' +
-    '  ffd8ff??) ;;\n' +
-    '  89504e47) ;;\n' +
+    'head=$(dd if="$t" iflag=nofollow,nonblock bs=32 count=1 status=none \\\n' +
+    '        | od -An -tx1 -v | tr -d " \\n")\n' +
+    'case "$head" in\n' +
+    // JPEG needs no dimension check: Qt scales it during load, so the source
+    // size is never held in full. Measured at +4 MiB for an 8000x8000 JPEG.
+    '  ffd8ff??*) ;;\n' +
+    // PNG, with the 13-byte IHDR where the signature says it must be. Anchoring
+    // on the full 8-byte signature and on the IHDR tag is what makes bytes
+    // 16..23 the dimensions rather than whatever happens to sit at that offset.
+    '  89504e470d0a1a0a????????49484452*)\n' +
+    '    w=$(( 0x$(printf %s "$head" | cut -c33-40) ))\n' +
+    '    h=$(( 0x$(printf %s "$head" | cut -c41-48) ))\n' +
+    // Fail closed on anything that did not parse to a plain number. A shell
+    // whose arithmetic refused the hex constant lands here rather than falling
+    // through with an empty value.
+    '    case "$w$h" in \'\'|*[!0-9]*) rm -f -- "$t"; exit 5 ;; esac\n' +
+    '    [ "$w" -ge 1 ] && [ "$h" -ge 1 ] || { rm -f -- "$t"; exit 5; }\n' +
+    // Both sides are bounded BEFORE they are multiplied. A PNG may declare up
+    // to 2^32-1 on each axis, and 4294967295 squared overflows a 64-bit
+    // arithmetic and can come back negative -- which would pass a naive
+    // less-than test. Bounding each side first keeps the product under 2^24.
+    '    [ "$w" -le ' + photoMaxDim + ' ] && [ "$h" -le ' + photoMaxDim + ' ] \\\n' +
+    '      || { rm -f -- "$t"; exit 5; }\n' +
+    '    [ $(( w * h )) -le ' + photoMaxPixels + ' ] || { rm -f -- "$t"; exit 5; }\n' +
+    '    ;;\n' +
     '  *) rm -f -- "$t"; exit 3 ;;\n' +
     'esac\n' +
     'printf %s "$t" | head -c ' + (pathCapBytes + 1) + '\n'
@@ -885,6 +958,9 @@ Panel {
       if (exitCode === 0) return
       root.fetchFailed(exitCode === 3 ? "That file was not an image."
                      : exitCode === 4 ? "That photo was too large."
+                     // Distinct from 4: the file was small, but its header
+                     // declared more pixels than this plugin will decode.
+                     : exitCode === 5 ? "That photo was too large to decode."
                                       : "Could not download the photo.")
     }
   }
@@ -1512,6 +1588,12 @@ Panel {
                 source: Qt.resolvedUrl("GlobeMap.qml")
 
                 onLoaded: {
+                  // The map's tiles are downloaded and checked before they are
+                  // decoded, so the layer needs the private directory and the
+                  // user agent. Bound rather than assigned: cacheDir is filled
+                  // in by a subprocess and is usually still "" at this point.
+                  item.cacheDir = Qt.binding(function () { return root.cacheDir })
+                  item.userAgent = Qt.binding(function () { return root.userAgent })
                   item.mode = Qt.binding(function () { return root.mapMode })
                   item.guess = Qt.binding(function () { return root.guess })
                   item.answer = Qt.binding(function () {

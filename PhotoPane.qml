@@ -10,7 +10,9 @@ import "Sanitise.js" as Sanitise
 // so it is attacker-influenced, and pointing Image.source at it would hand a
 // remote server an unbounded fetch and decode inside the long-lived shell
 // process. By the time a path reaches this file it has been through a host
-// allowlist, a byte ceiling, and a magic-number check.
+// allowlist, a byte ceiling, a magic-number check, and -- for PNG, where Qt
+// would otherwise decode the whole source before sourceSize could reduce it --
+// a check on the dimensions its header declares.
 //
 // The photograph is shown WHOLE. An earlier revision filled the pane with
 // PreserveAspectCrop, which is the right choice for a decorative background and
@@ -58,6 +60,10 @@ Item {
     // wash, so decoding it any larger would spend memory and a decode on detail
     // that is deliberately destroyed. It never draws directly -- MultiEffect
     // reads it as a texture, which is why it is visible: false.
+    //
+    // Note that this is a SECOND decode of the same file, so whatever a source
+    // costs to decode is paid twice over. One more reason the real ceiling has
+    // to be the header check in Panel.qml rather than anything set here.
     Image {
       id: backdrop
       anchors.fill: parent
@@ -100,11 +106,21 @@ Item {
       // finished with.
       cache: false
 
-      // The decode size is decided here, not by the file. Without an explicit
-      // sourceSize a 100-megapixel JPEG is decompressed at full resolution into
-      // the shell's heap before anyone sees it; with one, the decoder is told
-      // the ceiling up front. Rounded up to a coarse step so a resize by a few
-      // pixels does not force a re-decode.
+      // The size of the PIXMAP THAT IS KEPT is decided here, not by the file.
+      // Rounded up to a coarse step so a resize by a few pixels does not force a
+      // re-decode.
+      //
+      // This is the second bound on the decode rather than the only one, and it
+      // is worth being exact about which half of it this does. Qt scales during
+      // load for JPEG only. For a PNG it loads the source at its full declared
+      // size and scales afterwards, so sourceSize bounds what is RETAINED and
+      // not what is ALLOCATED on the way there -- measured, an 8000x8000 PNG of
+      // 61 KiB still peaked at 439.6 MiB with sourceSize set to 320x240.
+      //
+      // The bound that actually stops that is upstream, in Panel.qml: the
+      // downloader reads the PNG header and refuses the file on its declared
+      // dimensions before it is ever handed back as a path this pane can load.
+      // See photoMaxPixels there for the measurements.
       sourceSize.width: Math.max(320, Math.ceil(root.width / 160) * 160)
       sourceSize.height: Math.max(240, Math.ceil(root.height / 160) * 160)
 

@@ -181,7 +181,7 @@ providers inside the shell. Each is guarded at the sink, not only at the caller:
 |---|---|---|
 | `PhotoPane.qml` ×2 | the round's downloaded file | `Sanitise.localFileUrl()` — absolute, no scheme of its own, no `..`, no control characters, length-bounded; anything else yields `""` |
 | `PhotoPane.qml` `source: backdrop` | a `MultiEffect` texture source — an **Item**, not a URL | not a URL sink |
-| `TileLayer.qml` | a map tile | `GeoMath.tileUrl()` — hardcoded host and style, three integers re-derived and range-checked |
+| `TileLayer.qml` | the tile's downloaded file | `Sanitise.localFileUrl()`, as above; the URL it was fetched from is built by `GeoMath.tileBase()` plus three integers re-derived and range-checked |
 
 Both guards were moved **out of the QML and into the two libraries the check
 suites already load**, precisely so they are covered: a validator nothing tests
@@ -191,6 +191,72 @@ path-shaped string (`"0/../../evil"`); `localFileUrl` against `image://`,
 `http://`, `file://`, a relative path, traversal, an embedded newline, an
 embedded NUL and a 5,000-character path. Both are asserted to emit either `""`
 or their own scheme and host, never anything else — under Node **and** under V4.
+
+## Preflight area 16 — bound the decode, not just the download
+
+Raised in review at commit `4cc226d`: network-controlled PNGs reached `Image`
+with only `sourceSize` as a decoded-pixel guard, and Qt documents that only JPEG
+avoids loading the whole source during `sourceSize` scaling. That is correct, and
+it was a real hole in both the photograph path and the tile path.
+
+**Measured before fixing.** Each file loaded into an `Image` with
+`sourceSize` 320×240 — what `PhotoPane.qml` sets — under Qml Runtime 6.11.1,
+peak RSS of the process:
+
+| file | declared | on disk | peak RSS | status |
+|---|---|---|---|---|
+| baseline PNG | 256×256 | 141 B | 75.2 MiB | Ready |
+| JPEG | 8000×8000 | 244 KiB | 79.4 MiB | Ready |
+| PNG, grayscale | 8000×8000 | 61 KiB | **439.6 MiB** | Ready |
+| PNG, RGBA | 8000×8000 | 243 KiB | **562.7 MiB** | Ready |
+| PNG, grayscale | 20000×20000 | 380 KiB | 74.6 MiB | Error |
+
+Three things follow. JPEG really is scaled during load — it costs +4 MiB, so it
+needs no dimension check. PNG really is not — it costs +364 MiB and +487 MiB, and
+`sourceSize` bounds only the pixmap that is *kept*. And Qt 6's global
+`QImageReader` allocation limit is **not** a sufficient guard: it did refuse the
+20000×20000 case, but every 8000×8000 case loaded successfully, so half a
+gigabyte inside the shared shell process is reachable without tripping it — and a
+plugin cannot lower that limit without changing a global every other consumer in
+the shell reads.
+
+**The fix, in both places.** The header is read and the declared dimensions
+checked before the bytes reach a decoder:
+
+- **Photograph** — the download helper's existing magic-number read was widened
+  from 4 bytes to 32 and now also parses the PNG `IHDR`. The signature and the
+  `IHDR` tag are both anchored, which is what makes bytes 16–23 the dimensions
+  rather than whatever sits at that offset. Over 8192 a side or 8 megapixels
+  total, the file is deleted and the round reports "That photo was too large to
+  decode" (exit 5, distinct from the byte-ceiling exit 4). It is still **one**
+  read of that path, through `dd iflag=nofollow` — the bytes that decide the
+  format are the same bytes that decide the size.
+- **Map tile** — see the tile section below. Tiles are no longer handed to
+  `Image` as network URLs at all.
+
+**Ceilings, and why those numbers.** `pithumbsize` caps thumbnail *width* at
+1280 and lets height follow the aspect ratio, so a tall photograph is the large
+case; a real lead image measured here was 1280×2132, or 2.7 megapixels. Eight
+megapixels is roughly three times that and still bounds a decode at about 32 MiB.
+The 8192-per-side bound never rejects a real photograph — width is already held
+to 1280 by the request — and exists so that both operands are small before they
+are multiplied: a PNG may declare 2^32−1 on each axis, and that product overflows
+64-bit arithmetic and can come back negative, which would pass a naive
+less-than test. A file declaring 4294967295×4294967295 is in the check suite.
+
+**Traps hit while writing it.** `od` collapses a run of identical input lines to
+a `*`; without `-v` a 32-byte window of a PNG can trigger it and every image
+would be refused. And a shell whose arithmetic refused a `0x…` constant would
+leave the width empty, so the parse is checked for digits and **fails closed**
+rather than falling through.
+
+**Verified by execution, not by reading.** The generated helper scripts were
+extracted from the QML and run against real and hostile files. Photograph path:
+256×256 PNG accepted, real 1280×2132 Commons JPEG accepted, real CARTO tile
+accepted, 8000×8000 grayscale/RGBA and 20000×20000 PNGs refused with exit 5,
+8000×8000 JPEG accepted (correctly — Qt scales it), 100 random bytes and a
+truncated 8-byte header refused with exit 3, and the boundary checked on both
+sides: 4096×1024 accepted, 4096×1025 refused.
 
 ## Preflight area 7 — socket-idle timeout used as a response deadline
 
@@ -228,17 +294,24 @@ Note this pipeline feeds `rm`, not a parser. There is no truncated document to
 accept: if the byte ceiling ever fired, the effect is that one stale file is
 pruned later than it would have been.
 
-## Map tiles: the one remote `Image`, and why it is not the same thing
+## Map tiles
 
-`TileLayer.qml` assigns a network URL to `Image.source`. Everywhere else this
-plugin refuses to do that, so the distinction is worth stating precisely rather
-than leaving a reviewer to infer it.
+`TileLayer.qml` used to assign a network URL to `Image.source`, on the argument
+that a tile URL contains nothing that came off the network — a hardcoded host, a
+hardcoded style, and three integers computed from the pane. That argument is
+sound about the URL and says nothing about the **response**, which is the part
+that gets decoded; see the decode section above for the measurement that settled
+it. Tiles are now fetched and header-checked exactly as the photograph is, so the
+two paths no longer differ in kind:
 
 | | photograph | map tile |
 |---|---|---|
 | where the URL comes from | inside an API response | composed here: a hardcoded host, a hardcoded style, three integers |
-| can anything remote influence it | yes | no — there is no input |
-| how it is fetched | `curl` under `--max-filesize`, host allowlist, no redirects, magic-checked, then loaded as a **local file** | `Image`, because there is nothing to check |
+| can anything remote influence the URL | yes | no — there is no input |
+| can anything remote influence the bytes | yes | yes — it is still a remote server's reply |
+| how it is fetched | `curl` under `--max-filesize` and `head -c`, host allowlist, no redirects | `curl` under `--max-filesize` and `head -c`, six in flight, prefix fixed by `GeoMath.tileBase()` |
+| what is checked before decode | JPEG/PNG signature, and PNG dimensions ≤ 8 Mpx | PNG signature, and dimensions ≤ 512×512 |
+| what `Image` is given | a **local file** | a **local file** |
 
 The three integers come from `GeoMath.tileGrid()`, and both check suites assert —
 for every zoom the UI can reach — that each is an integer inside the tile
@@ -247,9 +320,21 @@ the projection puts that corner's coordinate. The last of those is the identity
 that keeps the tiles and the guess pin from drifting apart; a map that disagreed
 with its own projection would put every guess quietly off by however much.
 
-Bounded: at most 64 tiles exist at once (about 18 for a typical pane), and the
-ceiling is applied while the grid is **built**, not after — each entry becomes an
-`Image` that fetches and decodes inside the shared shell process.
+Bounded in three places, because they bound different things: at most 64 tiles
+exist at once (about 18 for a typical pane) and that ceiling is applied while the
+grid is **built**, not after; at most 96 are fetched per helper run, six
+transfers in flight; and at most 256 stay on disk, which matters because that
+disk is `$XDG_RUNTIME_DIR`, which is tmpfs, which is RAM. A measured tile is
+14,029 bytes, so the disk cache is about 3.5 MiB.
+
+The helper rebuilds each URL from three digit runs it re-validates itself, rather
+than trusting the names QML passed it — a name must be exactly three fields of
+digits and no longer than 20 characters. Writing that check turned up a real
+defect in an earlier draft of it: a two-field name like `4-8` satisfied a
+trailing-field test on its own, because the tail of a string with no separator in
+it is the whole string, and it was fetched as tile `4/8/8`. Nothing in QML can
+produce that shape, which is exactly why the check has to be on the side that
+builds the URL rather than on the side that is already careful.
 
 **Provider.** Tiles come from `basemaps.cartocdn.com`, not
 `tile.openstreetmap.org`. The OSM Foundation's tile usage policy forbids
@@ -262,7 +347,10 @@ precedent — the listed `eduardodallecort.weather-radar` uses the same host.
 **Offline.** Tiles are an enhancement, not a dependency. `TileLayer` counts
 consecutive failures and reports itself unhealthy after eight with no success,
 at which point the bundled Natural Earth outlines are drawn instead and the game
-stays playable. The globe never used tiles at all.
+stays playable. The globe never used tiles at all. The same path covers having
+nowhere safe to write: with no private directory there are no tiles, the layer
+reports unhealthy immediately, and the outlines take over — the plugin fails
+closed rather than falling back to somewhere shared.
 
 ## Untrusted input driving a path or an allocation
 
@@ -330,7 +418,8 @@ runtime.
 
 ## Supply chain
 
-Nothing is fetched at runtime except the two Wikimedia requests. The README's
+Nothing is fetched at runtime except the three Wikimedia requests and the map
+tiles. The README's
 install path is `omarchy plugin add <url>`. No download is piped into a shell
 anywhere in the repository -- not in the README, not in `tools/`, not at runtime.
 (That sentence is deliberately not written with the literal pattern in it: the
@@ -348,6 +437,14 @@ limit (130 KB and 43 KB), so the scan cannot fail closed on them.
 
 Three requests per round, one round at a time: one article query, one photo
 download, and one 361-byte credit lookup at reveal.
+
+Tiles are separate and are driven by the map rather than by the round. They are
+fetched only when the tile window moves by a whole tile, at most 96 per run with
+six transfers in flight, never more than one helper run at a time — a drag that
+crosses several boundaries in a second coalesces into one run for the window that
+ends up on screen rather than one run per boundary. A tile already on disk is not
+re-requested, so panning back over ground already seen makes no request at all,
+and the same User-Agent identifies the application to CARTO.
 Wikimedia publishes no hard anonymous limit for read queries, but
 its [user-agent policy](https://foundation.wikimedia.org/wiki/Policy:User-Agent_policy)
 requires a descriptive User-Agent identifying the application; a stock library
@@ -363,7 +460,7 @@ Against a hard-refreshed shell each time — installed copy synced,
 hot-reload:
 
 - `omarchy plugin validate` exits 0.
-- `tools/run-checks.sh`: data reproduces from the pinned commit; **17,815**
+- `tools/run-checks.sh`: data reproduces from the pinned commit; **18,567**
   assertions pass under Node; the V4 suite passes under Qt 6.11.1.
 - A complete 5-round game played end to end: photos fetched and rendered,
   guesses placed by mouse and by keyboard, both projections used, distances and
@@ -385,6 +482,42 @@ hot-reload:
   draw with their attribution, both pins and the line between them land on the
   tiled map, and the credit fetched from Commons at reveal appeared correctly
   (`Jehangir · CC BY-SA 3.0`). `preview.png` is a crop of that session.
+
+### The decode ceiling (this revision)
+
+Against a hard-refreshed shell — installed copy synced and confirmed identical to
+the working tree, `~/.cache/quickshell/qmlcache` deleted, `omarchy restart shell`:
+
+- A round renders as before. Tiles arrive in the private directory, all
+  `PNG image data, 256 x 256`, and the map draws from them — confirmed by the
+  CARTO label layer being on screen rather than the bundled outlines, which are
+  unlabelled. No warning or error from this plugin in the shell log.
+- The generated helper scripts were extracted from the QML and executed. Photo
+  path: the table of accept/refuse cases in the decode section above, including
+  both sides of the 4096×1024 / 4096×1025 boundary and a file declaring
+  4294967295 on each axis. Tile path: a real 18-tile window fetched and validated
+  in **507 ms**; a fully cached window in **16 ms**; every hostile payload
+  refused (8000×8000 grayscale and RGBA, 20000×20000, an 8000×8000 JPEG, random
+  bytes) with only real 256×256 tiles accepted; the disk prune taking 300 files
+  to 256, newest kept.
+- Self-healing after a prune was tested directly: with a window fully cached, one
+  file was deleted and the next run re-fetched exactly that tile and reported the
+  whole window.
+
+Two defects were found by testing rather than by reading, and both are fixed:
+
+1. **`4-8` passed the helper's tile-name check.** A trailing-field test alone
+   accepts a two-field name, because the tail of a string with no separator in it
+   is the whole string; it was fetched as tile `4/8/8`. The check now pins the
+   field count from both ends and bounds the name's length.
+2. **The map stayed on the outlines for the whole session.** `tileDir` was a
+   property derived from `cacheDir`, and `cacheDir` arrives late because the
+   directory is created and verified in a subprocess. The handler reacting to its
+   arrival ran while the derived property still held the old empty value — QML
+   does not order a change handler on a property against re-evaluation of the
+   bindings depending on it — so the layer asked for tiles, saw no directory, and
+   nothing changed again to make it ask twice. It is a function now, computed at
+   the moment it is called.
 
 ### Photo source
 
