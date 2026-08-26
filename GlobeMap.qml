@@ -22,6 +22,12 @@ import "data/WorldOutline.js" as WorldOutline
 Item {
   id: root
 
+  // Passed straight through to TileLayer, which is the only thing here that
+  // touches the network. Nothing else in this file does -- the country rings
+  // are the bundled data/WorldOutline.js.
+  property string cacheDir: ""
+  property string userAgent: ""
+
   // ------------------------------------------------------------------ inputs
 
   // "map" (equirectangular) or "globe" (orthographic).
@@ -175,6 +181,11 @@ Item {
     active: root.mode === "map"
     visible: root.mode === "map"
     view: root.view
+    // Tiles are downloaded and header-checked before anything decodes them, so
+    // the layer needs the private directory Panel.qml verified. Without one it
+    // reports itself unhealthy and the outlines below take over.
+    cacheDir: root.cacheDir
+    userAgent: root.userAgent
   }
 
   // The bundled outlines. In globe mode they are the map; in map mode they are

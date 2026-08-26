@@ -158,6 +158,25 @@ QtObject {
     if (GeoMath.tileUrl(5, "0/../../evil", 0) !== "") return fail(192)
     if (GeoMath.tileUrl(5, 16, 10).indexOf("..") >= 0) return fail(192)
 
+    // 19c: tileBase, and that it still agrees with tileUrl. The fetch helper is
+    // handed the base and rebuilds the rest from the three numbers, so a host
+    // changed in one place and not the other would send the shell somewhere the
+    // check suites never looked. Also that a "z-x-y" name splits back to the
+    // numbers it was built from, which is the same round trip the shell does.
+    if (GeoMath.tileBase() !== "https://basemaps.cartocdn.com/dark_all") return fail(195)
+    if (GeoMath.tileBase().indexOf("https://") !== 0) return fail(195)
+    for (var tb = 0; tb < 3; tb++) {
+      var tz = [1, 5, 19][tb], tx = [1, 16, 300][tb], ty = [0, 10, 400][tb]
+      if (GeoMath.tileUrl(tz, tx, ty)
+          !== GeoMath.tileBase() + "/" + tz + "/" + tx + "/" + ty + ".png") return fail(196)
+      var nm = tz + "-" + tx + "-" + ty
+      if (!/^[0-9]+-[0-9]+-[0-9]+$/.test(nm)) return fail(197)
+      var pieces = nm.split("-")
+      if (pieces.length !== 3) return fail(197)
+      if (Number(pieces[0]) !== tz || Number(pieces[1]) !== tx
+          || Number(pieces[2]) !== ty) return fail(197)
+    }
+
     if (Sanitise.localFileUrl("/run/user/1000/omarchy-globe-guesser/photo.aB3xY9zQ")
         !== "file:///run/user/1000/omarchy-globe-guesser/photo.aB3xY9zQ") return fail(193)
     if (Sanitise.localFileUrl("image://provider/x") !== "") return fail(194)

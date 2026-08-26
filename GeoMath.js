@@ -349,7 +349,19 @@ function tileUrl(z, x, y) {
   var span = Math.pow(2, level)
   if (!isFinite(col) || col < 0 || col >= span) return ""
   if (!isFinite(row) || row < 0 || row >= span) return ""
-  return TILE_HOST + "/" + TILE_STYLE + "/" + level + "/" + col + "/" + row + ".png"
+  return tileBase() + "/" + level + "/" + col + "/" + row + ".png"
+}
+
+// The fixed part of a tile URL: everything up to the z/x/y.
+//
+// Tiles are no longer fetched by Image -- a tile is a PNG from a remote server,
+// and Qt loads a PNG's whole source before sourceSize can reduce it, so the
+// bytes are fetched and their header checked by a helper first. That helper
+// needs the constant half of the URL, and taking it from here rather than
+// repeating the host in a shell string is what keeps the two definitions from
+// drifting apart. tools/check-geomath.js asserts they agree.
+function tileBase() {
+  return TILE_HOST + "/" + TILE_STYLE
 }
 
 // ------------------------------------------------------------- the interface

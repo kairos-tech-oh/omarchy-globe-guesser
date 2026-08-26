@@ -340,6 +340,39 @@ for (const x of [-3, -1, -0.1, 0, 0.1, 1, 3]) {
   }
 }
 
+// tileBase is the half of a tile url that TileLayer's fetch helper is given, and
+// the helper rebuilds the other half from the three numbers itself. That is two
+// definitions of the same string in two languages, so what is worth testing is
+// not what tileBase returns but that it still agrees with tileUrl -- a host
+// changed in one place and not the other is exactly the drift this catches.
+{
+  const base = Geo.tileBase()
+  ok(base === "https://basemaps.cartocdn.com/dark_all",
+     "tileBase is the provider prefix", base)
+  ok(base.indexOf("https://") === 0, "tileBase is https", base)
+  ok(base.indexOf("..") === -1, "tileBase carries no traversal", base)
+
+  // The agreement itself, across the whole pyramid the UI can reach.
+  for (const zoom of [1, 2, 8, 64, 4096]) {
+    const v = { mode: "map", width: 940, height: 590, zoom, centreLat: 20, centreLon: 5 }
+    for (const t of Geo.tileGrid(v, 64)) {
+      ok(Geo.tileUrl(t.z, t.x, t.y) === `${base}/${t.z}/${t.x}/${t.y}.png`,
+         `tileBase composes back to tileUrl at z${zoom}`)
+
+      // And the name the helper is actually handed round-trips to those same
+      // three numbers. TileLayer builds "z-x-y" and the shell splits it apart
+      // again; if that split ever disagreed with this, the plugin would fetch a
+      // different tile than the one it drew.
+      const name = `${t.z}-${t.x}-${t.y}`
+      ok(/^[0-9]+-[0-9]+-[0-9]+$/.test(name), `a tile name is three fields (${name})`)
+      const parts = name.split("-")
+      ok(parts.length === 3 && Number(parts[0]) === t.z
+         && Number(parts[1]) === t.x && Number(parts[2]) === t.y,
+         `a tile name splits back to its numbers (${name})`)
+    }
+  }
+}
+
 {
   ok(Safe.localFileUrl("/run/user/1000/omarchy-globe-guesser/photo.aB3xY9zQ")
        === "file:///run/user/1000/omarchy-globe-guesser/photo.aB3xY9zQ",

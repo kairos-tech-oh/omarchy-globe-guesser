@@ -1,5 +1,7 @@
 # Globe Guesser
 
+![Globe Guesser — a night photograph of a lit bridge beside the world map, mid-round](screenshot.png)
+
 A photograph, somewhere on Earth. Click the map — or spin the globe — to say
 where you think it was taken.
 
@@ -109,7 +111,7 @@ account.
 | `en.wikipedia.org/w/api.php` | One `geosearch` query listing articles near a city with their coordinates and lead images | No hard anonymous limit; the [user-agent policy](https://foundation.wikimedia.org/wiki/Policy:User-Agent_policy) requires a descriptive User-Agent | One identifying User-Agent, one query per round, never more than one request per second. Measured 17–30 KB per reply |
 | `upload.wikimedia.org` | Downloads the one chosen photograph | — | One download per round, capped at 6 MB, no redirects followed |
 | `commons.wikimedia.org/w/api.php` | The photographer and licence for that one file, so the credit can be shown | as above | One request per round, at reveal, off the path that decides how fast the photo appears. Measured 361 bytes |
-| `basemaps.cartocdn.com` | OpenStreetMap map tiles, while the map is on screen | Free public basemaps, attribution required | At most 64 tiles at a time, ~18 for a typical pane. Cached by URL, so panning back over ground already seen costs nothing |
+| `basemaps.cartocdn.com` | OpenStreetMap map tiles, while the map is on screen | Free public basemaps, attribution required | At most 64 tiles at a time, ~18 for a typical pane, six transfers in flight. Each capped at 256 KiB and refused unless it is a PNG of at most 512×512. Cached on disk and by URL, so panning back over ground already seen costs nothing |
 
 **Why CARTO and not `tile.openstreetmap.org`.** The OSM Foundation's
 [tile usage policy](https://operations.osmfoundation.org/policies/tiles/) forbids
@@ -123,12 +125,21 @@ for the article query, 32 KiB for the credit, 6 MB for the photograph. Nothing
 else is contacted, ever. The map, the globe, the scoring and the "12 km from
 Kyoto" line are all computed from bundled data.
 
-Map tiles are the one thing here loaded straight into an `Image`. That is
-deliberate and is the opposite of how the photographs are treated: a tile URL is
-a hardcoded host plus three integers this plugin computed from the size of the
-pane, with nothing in it that came off the network, whereas a photograph's URL
-arrives inside an API response and is therefore checked, fetched under a byte
-ceiling, and magic-checked before anything renders it.
+**Nothing is loaded into an `Image` straight off the network** — not the
+photographs, and, since the decode ceiling was tightened, not the map tiles
+either. Both are downloaded first, under a byte ceiling at the producer, and both
+have their image header read and checked before anything decodes them.
+
+The reason the header check exists and a size cap is not enough: a PNG stores its
+pixel count in the header and its pixels compressed, so the two numbers are
+unrelated. A 61 KiB file can declare 8000×8000. Qt's `sourceSize` does not save
+you there — it scales *during* load for JPEG only, and for any other format it
+loads the source at full size and scales afterwards, so the peak is already paid.
+Measured on Qt 6.11.1, loading such a file into an `Image` with `sourceSize` set
+to 320×240 peaked at **439.6 MiB** against a 75.2 MiB baseline, inside the
+long-lived shell process. So a photograph is refused above 8 megapixels and a
+tile above 512×512, on the dimensions their headers declare, before a decoder
+ever sees the bytes.
 
 One extra request happens when you **open** the panel while no game is running:
 the first round is fetched while you are still looking at the start screen, so
@@ -173,7 +184,7 @@ uses, and is not Node.
 | `BarWidget.qml` | The bar slot and the click target that opens the panel |
 | `Panel.qml` | The game: state machine, the two network calls, scoring, persistence |
 | `GlobeMap.qml` | The guessing surface — tiles, outline canvas, markers, pan/zoom/spin |
-| `TileLayer.qml` | The OpenStreetMap tile grid, and noticing when it cannot be reached |
+| `TileLayer.qml` | The OpenStreetMap tile grid — fetching tiles under a byte and dimension ceiling, caching them, and noticing when they cannot be reached |
 | `PhotoPane.qml` | The photograph, its loading and error states, and its attribution |
 | `GeoMath.js` | Projections and their inverses, great-circle distance, the score curve |
 | `Sanitise.js` | Everything that crosses into or out of the plugin as text |
