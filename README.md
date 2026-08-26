@@ -1,5 +1,7 @@
 # Globe Guesser
 
+![Globe Guesser — a night photograph of a lit bridge beside the world map, mid-round](screenshot.png)
+
 A photograph, somewhere on Earth. Click the map — or spin the globe — to say
 where you think it was taken.
 
