@@ -1,6 +1,6 @@
 # Globe Guesser
 
-![Globe Guesser — a night photograph of a lit bridge beside the world map, mid-round](screenshot.png)
+![Globe Guesser mid-round: a coastal city photograph beside the world map, with Skip, Give up and Confirm](screenshot.png)
 
 A photograph, somewhere on Earth. Click the map — or spin the globe — to say
 where you think it was taken.
@@ -16,10 +16,11 @@ kept.
   definition a place — a station, a bridge, a district, a cathedral — and its
   lead image is a photograph an editor chose to show what that place looks like.
   The answer is the article's own recorded position, not the city centre.
-- **Two ways to guess.** An OpenStreetMap map you can zoom down to street level,
-  or a globe you can spin. The map draws OpenStreetMap tiles; the globe, and the
-  map when there is no network, are drawn from bundled Natural Earth outlines —
-  so the game stays playable offline, it simply loses the detail.
+- **Two ways to guess.** A flat world map you can pan and zoom, or a globe you
+  can spin. Both are drawn from bundled Natural Earth outlines, so the whole game
+  works with no network, no account and no key. Add your own free CARTO key and
+  the map upgrades to real OpenStreetMap tiles you can zoom to street level —
+  see [Map detail](#map-detail-and-the-carto-key).
 - **Playable without a mouse.** Arrow keys (or `hjkl`) place and nudge the pin,
   `Enter` confirms, `M` and `G` switch between map and globe, `Esc` closes.
 - **Attribution shown.** Commons photographs are almost all CC-licensed. The
@@ -32,7 +33,7 @@ kept.
 |---|---|
 | Click the map or globe | Place your guess |
 | Drag | Pan the map, or spin the globe |
-| Scroll | Zoom, centred on the pointer — the map goes all the way to street level |
+| Scroll | Zoom, centred on the pointer — all the way to street level with a CARTO key set, to country shapes without one |
 | Arrow keys / `hjkl` | Place the pin, then nudge it — finer the further you are zoomed in |
 | `M` / `G` | Switch to the map / the globe |
 | `Enter` | Confirm the guess, then move to the next round |
@@ -100,25 +101,57 @@ Under *Fun* in the Omarchy settings UI.
 | Rounds per game | 3–10 | 5 | How many photos make up one game |
 | Starting view | map / globe | map | Which surface a round opens on. You can switch mid-round either way |
 | Photo radius (km) | 1–10 | 10 | How far from a city centre a place may be. 10 km is both the default and MediaWiki's hard ceiling for a geosearch, so this only ever narrows the search |
+| CARTO basemap key | text | *(empty)* | Optional. Empty means the map is drawn from bundled outlines and no tile is ever requested. Set it for street-level detail — see [Map detail](#map-detail-and-the-carto-key) |
 
 ## Network use
 
 Three small requests per round, all anonymous, none needing an API key or an
-account.
+account. **Out of the box the plugin makes no map-tile request at all** — the map
+is drawn from bundled offline outlines. Street-level tiles are opt-in and need a
+key of your own; see [Map detail](#map-detail-and-the-carto-key) below.
 
 | Service | What for | Published limit | What this plugin does |
 |---|---|---|---|
 | `en.wikipedia.org/w/api.php` | One `geosearch` query listing articles near a city with their coordinates and lead images | No hard anonymous limit; the [user-agent policy](https://foundation.wikimedia.org/wiki/Policy:User-Agent_policy) requires a descriptive User-Agent | One identifying User-Agent, one query per round, never more than one request per second. Measured 17–30 KB per reply |
 | `upload.wikimedia.org` | Downloads the one chosen photograph | — | One download per round, capped at 6 MB, no redirects followed |
 | `commons.wikimedia.org/w/api.php` | The photographer and licence for that one file, so the credit can be shown | as above | One request per round, at reveal, off the path that decides how fast the photo appears. Measured 361 bytes |
-| `basemaps.cartocdn.com` | OpenStreetMap map tiles, while the map is on screen | Free public basemaps, attribution required | At most 64 tiles at a time, ~18 for a typical pane, six transfers in flight. Each capped at 256 KiB and refused unless it is a PNG of at most 512×512. Cached on disk and by URL, so panning back over ground already seen costs nothing |
+| `basemaps.cartocdn.com` | OpenStreetMap map tiles, while the map is on screen | Requires an API key since August 2026; free to 5M tiles/month | **Only if you set a key.** With none, nothing is requested. At most 64 tiles at a time, ~18 for a typical pane, six transfers in flight. Each capped at 256 KiB and refused unless it is a PNG of at most 512×512. Cached on disk and by URL, so panning back over ground already seen costs nothing |
+
+### Map detail and the CARTO key
+
+The game is fully playable with no key and no account. The map and the globe are
+drawn from bundled Natural Earth outlines — coastlines, borders, and the shapes
+you need to place a city — and that is the default.
+
+What a key buys you is **detail**: real OpenStreetMap tiles you can zoom down to
+street level, which makes a hard round much more guessable.
+
+In August 2026 CARTO began requiring an API key for their raster basemaps and
+stamping an `API KEY REQUIRED` watermark across every unauthenticated tile. The
+request still succeeds and the tile is still a valid image, so this is not a
+failure the plugin can detect and route around — it just comes back defaced.
+Rather than ship a watermarked map, or embed a key of ours that would be a shared
+secret in a public repository and our quota to exhaust, the key is yours:
+
+1. Get a free one at [carto.com/basemaps/apikey](https://carto.com/basemaps/apikey/)
+   (fair use is 5 million tiles a month; this plugin uses roughly 18 per new map
+   view, and cached ones are never re-fetched).
+2. Put it in the widget's settings under **CARTO basemap key**.
+
+Leave it empty and no tile request is ever made.
+
+One thing worth knowing: a *wrong* key gets you the same watermarked tile as no
+key, byte for byte, because CARTO answers both the same way. If the map comes
+back watermarked, the key is wrong — the plugin has no way to tell those two
+cases apart and does not pretend to.
 
 **Why CARTO and not `tile.openstreetmap.org`.** The OSM Foundation's
 [tile usage policy](https://operations.osmfoundation.org/policies/tiles/) forbids
 distributing an application that draws on their servers — they are donated
-infrastructure for the map's own website, not a free CDN. CARTO renders the same
-OpenStreetMap data and publishes these basemaps for public use with attribution,
-which the map shows.
+infrastructure for the map's own website, not a free CDN. The same rules out
+`maps.wikimedia.org`, whose policy limits it to sites hosted by the Wikimedia
+Foundation or its affiliates. CARTO renders the same OpenStreetMap data, and the
+map shows the attribution their terms require.
 
 Every response is capped at the producer before the shell can hold it: 256 KiB
 for the article query, 32 KiB for the credit, 6 MB for the photograph. Nothing
@@ -148,9 +181,10 @@ taken as intending to play; merely having the widget on your bar is not, and
 nothing is fetched at login.
 
 Turn the network off mid-game and the photograph fails with a readable message
-and a **Try another** button. The map notices its tiles are not arriving and
-falls back to the bundled outlines, so you can still place a guess — with
-country shapes instead of streets.
+and a **Try another** button. If you had tiles, the map notices they are not
+arriving and falls back to the bundled outlines, so you can still place a guess —
+with country shapes instead of streets. Without a key it was already drawing
+those outlines, so the map does not change at all.
 
 ## Where the map comes from
 

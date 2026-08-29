@@ -341,7 +341,7 @@ function unprojectGlobe(view, x, y) {
 var TILE_HOST = "https://basemaps.cartocdn.com"
 var TILE_STYLE = "dark_all"
 
-function tileUrl(z, x, y) {
+function tileUrl(z, x, y, key) {
   var level = Math.floor(Number(z))
   var col = Math.floor(Number(x))
   var row = Math.floor(Number(y))
@@ -349,7 +349,38 @@ function tileUrl(z, x, y) {
   var span = Math.pow(2, level)
   if (!isFinite(col) || col < 0 || col >= span) return ""
   if (!isFinite(row) || row < 0 || row >= span) return ""
+  var suffix = tileKey(key)
   return tileBase() + "/" + level + "/" + col + "/" + row + ".png"
+       + (suffix === "" ? "" : "?key=" + suffix)
+}
+
+// The CARTO basemap key, validated, or "" if it is not one.
+//
+// In August 2026 CARTO began stamping an "API KEY REQUIRED" watermark across
+// every unauthenticated raster tile. The tile bytes were unchanged -- their CDN
+// applies the notice at the edge -- so nothing about the request was rejected
+// and nothing failed; the map simply came back defaced. There is no free
+// keyless raster basemap left that a distributed application may use: the OSM
+// Foundation's own servers forbid it, and maps.wikimedia.org is limited to sites
+// hosted by the Foundation or its affiliates.
+//
+// So the key is the player's own, typed into the plugin's settings, and empty by
+// default. Empty means no tiles and no request at all -- the bundled Natural
+// Earth outlines draw the map instead, which is what the game has always fallen
+// back to offline.
+//
+// This is the one place the alphabet is defined, because the key reaches a URL
+// from a settings field the player controls. Unreserved URL characters only:
+// nothing here can start a query parameter, close the path, or open a fragment.
+// The fetch helper re-checks the same alphabet on its side, since it is the side
+// that actually builds the URL.
+function tileKey(key) {
+  // A string, and only a string. Coercing first would let 0, false, NaN and
+  // Infinity through -- String(NaN) is "NaN", which is inside the alphabet below
+  // and would be sent as a key. None of those is a key anyone typed, and a
+  // setting that arrives as the wrong type is a bug to refuse, not to stringify.
+  if (typeof key !== "string") return ""
+  return /^[A-Za-z0-9._~-]{1,256}$/.test(key) ? key : ""
 }
 
 // The fixed part of a tile URL: everything up to the z/x/y.

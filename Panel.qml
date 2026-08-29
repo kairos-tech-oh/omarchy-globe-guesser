@@ -75,6 +75,18 @@ Panel {
   readonly property int searchRadiusKm:
       Math.min(10, Math.max(1, parseInt(setting("searchRadiusKm", 10), 10) || 10))
 
+  // The player's own CARTO basemap key, or "" for none -- which is the default
+  // and the case the game is designed around. Validated by GeoMath.tileKey
+  // rather than here, because that is the one place the alphabet is defined and
+  // both check suites already cover it; anything that is not a key collapses to
+  // "" and the map falls back to the bundled outlines.
+  //
+  // Why this setting exists at all: in August 2026 CARTO began stamping an
+  // "API KEY REQUIRED" watermark across every unauthenticated raster tile. The
+  // request still succeeds, so nothing in this plugin could detect it as a
+  // failure -- the tiles simply arrived defaced. See GeoMath.tileKey.
+  readonly property string cartoApiKey: GeoMath.tileKey(setting("cartoApiKey", ""))
+
   readonly property int maxRadiusMetres: 10000
 
   // ---------------------------------------------------------------- ceilings
@@ -165,7 +177,7 @@ Panel {
   // The Wikimedia user-agent policy requires a request to identify the
   // application; a stock library User-Agent is explicitly not acceptable.
   readonly property string userAgent:
-      "omarchy-globe-guesser/1.0.0 (+https://github.com/kairos-tech-oh/omarchy-globe-guesser)"
+      "omarchy-globe-guesser/1.1.0 (+https://github.com/kairos-tech-oh/omarchy-globe-guesser)"
 
   // Commons is generous with anonymous read queries and this plugin makes one
   // per round, but a player leaning on Skip should not be able to turn that into
@@ -1594,6 +1606,7 @@ Panel {
                   // in by a subprocess and is usually still "" at this point.
                   item.cacheDir = Qt.binding(function () { return root.cacheDir })
                   item.userAgent = Qt.binding(function () { return root.userAgent })
+                  item.apiKey = Qt.binding(function () { return root.cartoApiKey })
                   item.mode = Qt.binding(function () { return root.mapMode })
                   item.guess = Qt.binding(function () { return root.guess })
                   item.answer = Qt.binding(function () {

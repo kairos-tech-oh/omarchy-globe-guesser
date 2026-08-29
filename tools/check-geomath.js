@@ -373,6 +373,49 @@ for (const x of [-3, -1, -0.1, 0, 0.1, 1, 3]) {
   }
 }
 
+// tileKey guards the one value in this plugin that a PLAYER types and that then
+// reaches a URL. Everything else on that path came from our own arithmetic.
+//
+// The alphabet is the URL-unreserved set, so the test that matters is that
+// nothing which could change the SHAPE of the request survives: no separator
+// that starts a second parameter, closes the path, or opens a fragment.
+{
+  ok(Geo.tileKey("abc123") === "abc123", "a plain key survives")
+  ok(Geo.tileKey("aB3-x_y.z~") === "aB3-x_y.z~", "every unreserved character survives")
+  ok(Geo.tileKey("x".repeat(256)) === "x".repeat(256), "256 characters is allowed")
+
+  for (const bad of [
+    "", " ", "a b", "a\tb", "a\nb",
+    "k&style=dark", "k?z=1", "k#frag", "a/b", "a\\b", "../../etc/passwd",
+    "k%26x", "k+x", "k=x", "k;x", "k,x", "k'x", 'k"x', "k<x>", "k|x",
+    "x".repeat(257),
+    NaN, Infinity, undefined, null, {}, [], 0, false,
+  ]) {
+    ok(Geo.tileKey(bad) === "", `a key that is not one is refused (${JSON.stringify(String(bad))})`)
+  }
+
+  // A refused key must not silently become an unauthenticated request: the url
+  // comes back with no query at all, and TileLayer refuses to fetch on the same
+  // test. An unauthenticated tile is not an error -- it is a watermarked one.
+  ok(Geo.tileUrl(5, 16, 10, "k&evil=1") === "https://basemaps.cartocdn.com/dark_all/5/16/10.png",
+     "a refused key leaves the url unkeyed rather than injecting it")
+
+  // The composition the fetch helper rebuilds on its side, asserted here so the
+  // two cannot drift -- the helper appends ?key= to tileBase()/z/x/y.png itself.
+  for (const zoom of [1, 2, 8, 64]) {
+    const v = { mode: "map", width: 940, height: 590, zoom, centreLat: 20, centreLon: 5 }
+    for (const t of Geo.tileGrid(v, 64)) {
+      const key = "aB3-x_y.z~"
+      ok(Geo.tileUrl(t.z, t.x, t.y, key)
+         === `${Geo.tileBase()}/${t.z}/${t.x}/${t.y}.png?key=${key}`,
+         `a keyed tile url composes as the helper builds it at z${zoom}`)
+      ok(Geo.tileUrl(t.z, t.x, t.y, key).indexOf("?") ===
+         Geo.tileUrl(t.z, t.x, t.y, key).lastIndexOf("?"),
+         "a keyed tile url carries exactly one query separator")
+    }
+  }
+}
+
 {
   ok(Safe.localFileUrl("/run/user/1000/omarchy-globe-guesser/photo.aB3xY9zQ")
        === "file:///run/user/1000/omarchy-globe-guesser/photo.aB3xY9zQ",

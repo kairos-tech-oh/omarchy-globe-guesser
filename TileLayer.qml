@@ -61,9 +61,25 @@ Item {
   property string cacheDir: ""
 
   // Wikimedia's user-agent policy is about Wikimedia, but identifying the
-  // application is good manners to any tile provider, and CARTO is donated
-  // infrastructure too. Threaded down from Panel.qml so there is one string.
+  // application is good manners to any tile provider. Threaded down from
+  // Panel.qml so there is one string.
   property string userAgent: ""
+
+  // The player's own CARTO basemap key, or "" for none -- which is the default.
+  //
+  // Empty is not a degraded mode, it is the designed one: no key means no tile
+  // request is made at all and the bundled Natural Earth outlines are the map,
+  // exactly as they are offline. Fetching without a key would not fail, which is
+  // the whole problem -- since August 2026 CARTO answers an unauthenticated tile
+  // request with a perfectly valid PNG that has "API KEY REQUIRED" stamped
+  // across it. There is nothing for this layer to detect and nothing to fall
+  // back from, so the choice has to be made before the request, not after it.
+  property string apiKey: ""
+
+  // Validated by GeoMath, which is where the alphabet is defined and where both
+  // check suites already cover it. Anything that is not a key is "" and no tile
+  // is ever requested.
+  readonly property string validKey: GeoMath.tileKey(root.apiKey)
 
   // Whether tiles are wanted at all. Set false for the globe, which cannot use
   // them.
@@ -105,7 +121,8 @@ Item {
   // caller shows the bundled vector outlines instead, so the game stays playable
   // rather than presenting a blank rectangle and no explanation.
   readonly property bool healthy:
-      root.cacheDir !== "" && (root.failures < 8 || root.successes > 0)
+      root.validKey !== "" && root.cacheDir !== ""
+      && (root.failures < 8 || root.successes > 0)
 
   property int failures: 0
   property int successes: 0
@@ -181,6 +198,14 @@ Item {
   // until the next tile boundary was crossed.
   onCacheDirChanged: root.rebuild()
 
+  // A key typed in, corrected, or cleared changes what the map can draw. Cleared
+  // means the tiles already on screen are no longer ones this plugin is entitled
+  // to show, so they go immediately rather than lingering until the next pan.
+  onValidKeyChanged: {
+    if (root.validKey === "") root.have = ({})
+    root.rebuild()
+  }
+
   function tileName(tile) {
     return tile.z + "-" + tile.x + "-" + tile.y
   }
@@ -218,6 +243,16 @@ Item {
   // can reach the URL, whatever QML passed.
   readonly property string fetchScript:
     'd="$1"; ua="$2"; base="$3"; shift 3\n' +
+    // The key arrives on stdin as one line, not in argv. Read before anything
+    // else so a run that was launched without one stops here having made no
+    // request, and re-checked against the same alphabet GeoMath.tileKey uses --
+    // this is the side that builds the URL, so this is the side that has to be
+    // sure nothing in it can start a second parameter or close the path.
+    'IFS= read -r key || key=""\n' +
+    'case "$key" in\n' +
+    '  \'\'|*[!A-Za-z0-9._~-]*) exit 1 ;;\n' +
+    'esac\n' +
+    '[ ${#key} -le 256 ] || exit 1\n' +
     // The directory is re-verified on every run, not trusted from the run that
     // created it. Same three questions Panel.qml asks: a directory, not a
     // symlink, owned by us.
@@ -283,7 +318,7 @@ Item {
     // and `head -c` bounds what is written whatever the server declares --
     // including a chunked reply that declares nothing at all.
     '  curl -fsS --proto "=https" --max-time 15 --max-filesize ' + tileCapBytes + ' \\\n' +
-    '    -A "$ua" -- "$base/$tz/$tx/$ty.png" 2>/dev/null \\\n' +
+    '    -A "$ua" -- "$base/$tz/$tx/$ty.png?key=$key" 2>/dev/null \\\n' +
     '    | head -c ' + (tileCapBytes + 1) + ' > "$f"\n' +
     '  if check "$f"; then mv -f -- "$f" "$td/$tn.png"; else rm -f -- "$f"; fi\n' +
     '}\n' +
@@ -342,6 +377,9 @@ Item {
   // one that had to be fetched.
   function requestWindow() {
     if (root.tileDirPath() === "" || !root.active) return
+    // No key, no request. See `apiKey` for why this is a precondition rather
+    // than a failure the layer could notice afterwards.
+    if (root.validKey === "") return
 
     var wanted = []
     for (var i = 0; i < root.tiles.length; i++) wanted.push(root.tileName(root.tiles[i]))
@@ -358,6 +396,12 @@ Item {
     }
 
     root.inFlight = wanted
+    // The key goes over stdin, never argv. /proc/<pid>/cmdline is readable by
+    // this user's other processes, and a basemap key is the player's own
+    // credential against their own quota -- the fact that it also travels inside
+    // the tile URL is not a reason to hand it to every process on the machine as
+    // well. Same shape the shell's own network panel uses for a passphrase.
+    fetchProcess.secret = root.validKey
     fetchProcess.command = ["timeout", "-k", "2", "30", "sh", "-c", root.fetchScript, "sh",
                             root.cacheDir, root.userAgent, GeoMath.tileBase()].concat(wanted)
     fetchProcess.running = true
@@ -365,6 +409,15 @@ Item {
 
   Process {
     id: fetchProcess
+
+    // Written once the child is up, then dropped, so the key is not left sitting
+    // in a QML property between runs.
+    property string secret: ""
+    stdinEnabled: true
+    onStarted: {
+      write(secret + "\n")
+      secret = ""
+    }
 
     stdout: StdioCollector {
       waitForEnd: true
