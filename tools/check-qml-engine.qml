@@ -177,6 +177,29 @@ QtObject {
           || Number(pieces[2]) !== ty) return fail(197)
     }
 
+    // 19d: tileKey. The one value a PLAYER types that reaches a URL, so it is
+    // checked under V4 too -- V4 is the engine that decides what the shell
+    // actually fetches, and this guard is a regex and a typeof.
+    if (GeoMath.tileKey("aB3-x_y.z~") !== "aB3-x_y.z~") return fail(198)
+    var badKeys = ["", " ", "a b", "k&style=dark", "k?z=1", "k#frag", "a/b",
+                   "../../etc/passwd", "k=x", "k;x", "k|x", "k%26x", "k+x"]
+    for (var bk = 0; bk < badKeys.length; bk++) {
+      if (GeoMath.tileKey(badKeys[bk]) !== "") return fail(198)
+    }
+    // Non-strings, which coercion would otherwise turn into usable keys.
+    var badTypes = [NaN, Infinity, 0, false, null, undefined, {}, []]
+    for (var bt = 0; bt < badTypes.length; bt++) {
+      if (GeoMath.tileKey(badTypes[bt]) !== "") return fail(198)
+    }
+    if (GeoMath.tileKey(new Array(258).join("x")) !== "") return fail(198)
+
+    // A refused key must leave the url unkeyed rather than injecting it, and a
+    // good one must compose exactly as the fetch helper rebuilds it.
+    if (GeoMath.tileUrl(5, 16, 10, "k&evil=1")
+        !== "https://basemaps.cartocdn.com/dark_all/5/16/10.png") return fail(199)
+    if (GeoMath.tileUrl(5, 16, 10, "aB3-x_y.z~")
+        !== GeoMath.tileBase() + "/5/16/10.png?key=aB3-x_y.z~") return fail(199)
+
     if (Sanitise.localFileUrl("/run/user/1000/omarchy-globe-guesser/photo.aB3xY9zQ")
         !== "file:///run/user/1000/omarchy-globe-guesser/photo.aB3xY9zQ") return fail(193)
     if (Sanitise.localFileUrl("image://provider/x") !== "") return fail(194)

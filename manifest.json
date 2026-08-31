@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "kairos.globe-guesser",
   "name": "Globe Guesser",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "kairos",
   "license": "MIT",
   "description": "Guess where in the world a photo was taken. Five rounds, an OpenStreetMap map and a spinnable globe to click, and photographs of real places from Wikipedia. Falls back to a bundled offline map when there is no network.",
@@ -22,7 +22,8 @@
       "difficulty": "normal",
       "roundsPerGame": 5,
       "defaultView": "map",
-      "searchRadiusKm": 10
+      "searchRadiusKm": 10,
+      "cartoApiKey": ""
     },
     "schema": [
       {
@@ -67,6 +68,13 @@
         "step": 1,
         "defaultValue": 10,
         "description": "How far from a city centre a place may be. 10 km is both the default and MediaWiki's hard ceiling for a geosearch, so this only ever narrows the search. Smaller keeps photos in the city centre; it also finds fewer of them."
+      },
+      {
+        "key": "cartoApiKey",
+        "type": "string",
+        "label": "CARTO basemap key (optional)",
+        "defaultValue": "",
+        "description": "Optional. Leave empty and the map is drawn from bundled offline outlines, which needs no key and no account. CARTO began watermarking unauthenticated map tiles in August 2026, so detailed street-level tiles now need a key of your own: get a free one at carto.com/basemaps/apikey (5 million tiles a month). The key is used only to fetch map tiles."
       }
     ]
   }

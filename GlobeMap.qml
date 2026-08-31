@@ -28,6 +28,10 @@ Item {
   property string cacheDir: ""
   property string userAgent: ""
 
+  // The player's CARTO basemap key, or "" for none. Empty is the default and
+  // means the outlines below are the map, which is exactly what happens offline.
+  property string apiKey: ""
+
   // ------------------------------------------------------------------ inputs
 
   // "map" (equirectangular) or "globe" (orthographic).
@@ -186,6 +190,7 @@ Item {
     // reports itself unhealthy and the outlines below take over.
     cacheDir: root.cacheDir
     userAgent: root.userAgent
+    apiKey: root.apiKey
   }
 
   // The bundled outlines. In globe mode they are the map; in map mode they are
@@ -405,6 +410,11 @@ Item {
 
   // Required by both OpenStreetMap and CARTO, and shown wherever their tiles
   // are: the data is free, the acknowledgement is the price.
+  //
+  // It follows the tiles rather than the map. Without a key no tile is fetched
+  // and the outlines below are what is drawn -- those are bundled Natural Earth,
+  // which is public domain and neither party's work, so crediting CARTO for a
+  // map they did not render would be worse than not crediting them at all.
   Text {
     anchors.right: parent.right
     anchors.bottom: parent.bottom

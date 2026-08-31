@@ -336,13 +336,54 @@ it is the whole string, and it was fetched as tile `4/8/8`. Nothing in QML can
 produce that shape, which is exactly why the check has to be on the side that
 builds the URL rather than on the side that is already careful.
 
+**Tiles are opt-in, and off by default.** In August 2026 CARTO began requiring an
+API key for their raster basemaps and stamping an `API KEY REQUIRED` watermark
+across every unauthenticated tile. The watermark is applied at their CDN edge --
+their own response headers show it, `ifsz=14029` in and `ofsz=16376` out -- so
+the request still succeeds with a valid 256x256 PNG inside every ceiling this
+plugin enforces. There is nothing for the layer to detect and nothing to fall
+back *from*; the choice has to be made before the request.
+
+So the key is the player's own, entered in settings and empty by default. Empty
+means no tile request is made at all and the bundled Natural Earth outlines are
+the map, which is exactly the offline path the plugin already had. No key ships
+in the repository: one would be a shared secret in public, our quota, and our
+terms liability.
+
+Three notes a reviewer may want:
+
+- **The key never touches argv or the environment.** It goes over stdin, written
+  once the child is up and then cleared, the same shape
+  `plugins/panels/network/Panel.qml` uses for a passphrase. `/proc/<pid>/cmdline`
+  is readable by this user's other processes; that the key also travels inside
+  the tile URL is not a reason to hand it to every process on the machine too.
+- **The alphabet is defined once**, in `GeoMath.tileKey`, and re-checked by the
+  fetch helper because the helper is the side that builds the URL. It is the
+  URL-unreserved set, so nothing accepted can start a second parameter, close the
+  path, or open a fragment. Non-strings are refused rather than coerced --
+  `String(NaN)` is `"NaN"`, which is inside the alphabet and would have been sent
+  as a key. Both check suites cover it under Node and under V4.
+- **A wrong key is indistinguishable from no key.** CARTO answers both with the
+  same watermarked bytes -- verified, identical MD5 -- so the plugin does not
+  pretend to tell them apart. The README says so plainly. Rejecting on the CDN's
+  transform header was considered and dropped: it would be a guess about an
+  implementation detail, and the failure direction is to blank the map for
+  someone whose key actually works.
+
 **Provider.** Tiles come from `basemaps.cartocdn.com`, not
 `tile.openstreetmap.org`. The OSM Foundation's tile usage policy forbids
 distributing an application that draws on their servers; they are donated
-infrastructure for the map's own website. CARTO renders the same OpenStreetMap
-data and publishes these basemaps for public use with attribution, which is drawn
-on the map: `© OpenStreetMap contributors © CARTO`. There is marketplace
-precedent — the listed `eduardodallecort.weather-radar` uses the same host.
+infrastructure for the map's own website. The same rules out
+`maps.wikimedia.org`, whose policy limits it to sites hosted by the Wikimedia
+Foundation or its affiliates. CARTO renders the same OpenStreetMap data, and the
+attribution their terms require is drawn on the map:
+`© OpenStreetMap contributors © CARTO`. There is marketplace precedent — the
+listed `eduardodallecort.weather-radar` uses the same host.
+
+The attribution follows the tiles, not the map. With no key the outlines are what
+is drawn, and those are bundled Natural Earth, which is public domain and neither
+party's work — crediting CARTO for a map they did not render would be worse than
+not crediting them.
 
 **Offline.** Tiles are an enhancement, not a dependency. `TileLayer` counts
 consecutive failures and reports itself unhealthy after eight with no success,
@@ -449,7 +490,7 @@ Wikimedia publishes no hard anonymous limit for read queries, but
 its [user-agent policy](https://foundation.wikimedia.org/wiki/Policy:User-Agent_policy)
 requires a descriptive User-Agent identifying the application; a stock library
 User-Agent is explicitly not acceptable. This plugin sends
-`omarchy-globe-guesser/1.0.0 (+<repo url>)` on every request and enforces a
+`omarchy-globe-guesser/1.1.0 (+<repo url>)` on every request and enforces a
 minimum 1,000 ms gap, so leaning on **Skip** collapses into queued requests
 rather than a burst.
 
