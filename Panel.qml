@@ -3,6 +3,7 @@ import QtQuick.Controls
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "GeoMath.js" as GeoMath
 import "Sanitise.js" as Sanitise
@@ -313,8 +314,9 @@ Panel {
   }
 
   function switchPanel(direction) {
-    if (root.bar && root.bar.shell && typeof root.bar.shell.focusAdjacentPanel === "function")
-      root.bar.shell.focusAdjacentPanel(root.barIdentity, direction)
+    if (root.bar && typeof root.bar.switchPanelFrom === "function")
+      return root.bar.switchPanelFrom(root.barIdentity, direction)
+    return false
   }
 
   function setCenterHoverRevealSuppressed(value) {
@@ -1413,7 +1415,7 @@ Panel {
               width: parent.width
               text: "GLOBE GUESSER"
               textFormat: Text.PlainText
-              color: root.bar ? root.bar.foreground : Color.popups.text
+              color: root.bar ? root.bar.foreground : Commons.Color.popups.text
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.title
               font.bold: true
@@ -1489,7 +1491,7 @@ Panel {
                      + "to say where you think it was taken."
               }
               wrapMode: Text.WordWrap
-              color: root.bar ? root.bar.foreground : Color.popups.text
+              color: root.bar ? root.bar.foreground : Commons.Color.popups.text
               font.family: Style.font.family
               font.pixelSize: root.phase === "summary" ? Style.font.display : Style.font.body
               font.bold: root.phase === "summary"
@@ -1530,7 +1532,7 @@ Panel {
                     anchors.right: parent.right
                     textFormat: Text.PlainText
                     text: GeoMath.formatNumber(modelData.score)
-                    color: root.bar ? root.bar.foreground : Color.popups.text
+                    color: root.bar ? root.bar.foreground : Commons.Color.popups.text
                     font.family: Style.font.family
                     font.pixelSize: Style.font.bodySmall
                   }
@@ -1544,7 +1546,7 @@ Panel {
               textFormat: Text.PlainText
               visible: root.phase === "summary" && root.totalScore >= root.bestScore && root.totalScore > 0
               text: "A new best."
-              color: root.bar ? root.bar.foreground : Color.popups.text
+              color: root.bar ? root.bar.foreground : Commons.Color.popups.text
               font.family: Style.font.family
               font.pixelSize: Style.font.body
             }
@@ -1582,7 +1584,7 @@ Panel {
               // the answer appears rather than arriving with the photograph.
               photoCredit: root.roundCredit
               photoLicence: root.roundLicence
-              foreground: root.bar ? root.bar.foreground : Color.popups.text
+              foreground: root.bar ? root.bar.foreground : Commons.Color.popups.text
             }
 
             Item {
@@ -1615,10 +1617,10 @@ Panel {
                   })
                   item.interactive = Qt.binding(function () { return root.phase === "guessing" })
                   item.landStroke = Qt.binding(function () {
-                    return root.bar ? root.bar.foreground : Color.popups.text
+                    return root.bar ? root.bar.foreground : Commons.Color.popups.text
                   })
                   item.guessColor = Qt.binding(function () {
-                    return root.bar ? root.bar.foreground : Color.popups.text
+                    return root.bar ? root.bar.foreground : Commons.Color.popups.text
                   })
                   item.guessPlaced.connect(root.placeGuess)
                 }

@@ -56,6 +56,9 @@ else
   echo "  skipped: no qml runner found"
 fi
 
+note "shell conventions"
+tools/check-conventions.sh || status=1
+
 note "result"
 if [ "$status" -eq 0 ]; then
   echo "everything passed"
