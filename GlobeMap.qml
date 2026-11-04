@@ -403,8 +403,8 @@ Item {
       SequentialAnimation on scale {
         running: answerPin.visible
         loops: 3
-        NumberAnimation { from: 1; to: 1.5; duration: Style.duration(320); easing.type: Easing.OutQuad }
-        NumberAnimation { from: 1.5; to: 1; duration: Style.duration(320); easing.type: Easing.OutQuad }
+        NumberAnimation { from: 1; to: 1.5; duration: (Style.duration ? Style.duration(320) : 320); easing.type: Easing.OutQuad }
+        NumberAnimation { from: 1.5; to: 1; duration: (Style.duration ? Style.duration(320) : 320); easing.type: Easing.OutQuad }
       }
     }
   }

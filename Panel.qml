@@ -178,7 +178,7 @@ Panel {
   // The Wikimedia user-agent policy requires a request to identify the
   // application; a stock library User-Agent is explicitly not acceptable.
   readonly property string userAgent:
-      "omarchy-globe-guesser/1.1.0 (+https://github.com/kairos-tech-oh/omarchy-globe-guesser)"
+      "omarchy-globe-guesser/1.1.1 (+https://github.com/kairos-tech-oh/omarchy-globe-guesser)"
 
   // Commons is generous with anonymous read queries and this plugin makes one
   // per round, but a player leaning on Skip should not be able to turn that into
