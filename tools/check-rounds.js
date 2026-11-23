@@ -19,7 +19,7 @@ function throws(fn) { try { fn(); return false; } catch (e) { return true; } }
 
 const cmd = F.cappedCurl("https://en.wikipedia.org/w/api.php?x=1", 1000, 15, "ua/1");
 check("cappedCurl: caps at cap+1 bytes", cmd.indexOf("1001") > 0, cmd);
-check("cappedCurl: https only and no redirects", cmd.indexOf("--proto=https") > 0 && !cmd.some((a) => /^-[A-Za-z]*L/.test(a) || /^--location/.test(a)), cmd);
+check("cappedCurl: https only and no redirects", cmd[cmd.indexOf("--proto") + 1] === "=https" && !cmd.some((a) => /^--proto=/.test(a)) && !cmd.some((a) => /^-[A-Za-z]*L/.test(a) || /^--location/.test(a)), cmd);
 check("cappedCurl: user agent and url passed as argv", cmd[cmd.indexOf("-A") + 1] === "ua/1" && cmd[cmd.length - 2] === "--" && cmd[cmd.length - 1] === "https://en.wikipedia.org/w/api.php?x=1");
 check("cappedCurl: outer timeout exceeds curl's", cmd[3] === "20" && cmd[cmd.indexOf("--max-time") + 1] === "15", cmd);
 const zero = F.cappedCurl("https://en.wikipedia.org/", 10, 0, "ua");

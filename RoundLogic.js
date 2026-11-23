@@ -31,7 +31,7 @@ function cappedCurl(url, capBytes, maxTimeSec, userAgent) {
   return ["timeout", "-k", "2", String(deadlineSec),
           "sh", "-c", 'cap="$1"; shift; curl "$@" | head -c "$cap"', "sh",
           String(capBytes + 1),
-          "-fsS", "--proto=https", "--max-time", String(innerSec),
+          "-fsS", "--proto", "=https", "--max-time", String(innerSec),
           // Wikimedia serves these replies gzipped, and the JSON compresses
           // to roughly a fifth. curl inflates before writing to stdout, so
           // `head -c` still bounds the *decompressed* stream -- the ceiling

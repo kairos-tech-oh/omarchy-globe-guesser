@@ -297,6 +297,7 @@ QtObject {
     if (RoundLogic.clampRadius(50000, 10000) !== 10000 || RoundLogic.clampRadius(3, 10000) !== 10) return fail(63)
     var cmd = RoundLogic.cappedCurl("https://en.wikipedia.org/", 10, 0, "ua")
     if (cmd[cmd.indexOf("--max-time") + 1] !== "1" || cmd[3] !== "6") return fail(64)
+    if (cmd[cmd.indexOf("--proto") + 1] !== "=https") return fail(66)
     var pick = RoundLogic.chooseCandidate([{ score: 4, id: "a" }, { score: 1, id: "c" }], Math.random)
     if (pick.id !== "a") return fail(65)
 
