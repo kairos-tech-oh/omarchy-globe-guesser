@@ -266,10 +266,12 @@ tools/build-world.py --check
 tools/run-checks.sh
 ```
 
-Runs three things: that both data files rebuild byte-for-byte from the pinned
-upstream commit, that the maths and the sanitisers behave under Node, and that
-they behave under Qt's V4 engine — which is the engine omarchy-shell actually
-uses, and is not Node.
+Runs four things: that both data files rebuild byte-for-byte from the pinned
+upstream commit, that the maths and the sanitisers behave under Node, that the
+round logic behaves under Node (`tools/check-rounds.js`: the photo-URL allowlist,
+the article and file filters, filename and radius limits, candidate scoring and
+the near-best random pick), and that all of it behaves under Qt's V4 engine —
+which is the engine omarchy-shell actually uses, and is not Node.
 
 ### Files
 
@@ -277,6 +279,7 @@ uses, and is not Node.
 |---|---|
 | `BarWidget.qml` | The bar slot and the click target that opens the panel |
 | `Panel.qml` | The game: state machine, the two network calls, scoring, persistence |
+| `RoundLogic.js` | Where a round comes from: the curl command, the Wikipedia and Commons URLs, the filters and score that turn a geosearch reply into photo candidates, and the pick |
 | `GlobeMap.qml` | The guessing surface — tiles, outline canvas, markers, pan/zoom/spin |
 | `TileLayer.qml` | The OpenStreetMap tile grid — fetching tiles under a byte and dimension ceiling, caching them, and noticing when they cannot be reached |
 | `PhotoPane.qml` | The photograph, its loading and error states, and its attribution |

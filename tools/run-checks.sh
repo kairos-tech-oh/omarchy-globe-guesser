@@ -30,6 +30,7 @@ fi
 note "GeoMath and Sanitise under Node"
 if command -v node >/dev/null 2>&1; then
   node tools/check-geomath.js || status=1
+  node tools/check-rounds.js || status=1
 else
   echo "  skipped: node not installed (development-only dependency)"
 fi
