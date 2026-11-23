@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "kairos.globe-guesser",
   "name": "Globe Guesser",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": "kairos",
   "license": "MIT",
   "description": "Guess where in the world a photo was taken. Five rounds, an OpenStreetMap map and a spinnable globe to click, and photographs of real places from Wikipedia. Falls back to a bundled offline map when there is no network.",

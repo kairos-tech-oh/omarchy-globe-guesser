@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import "GeoMath.js" as GeoMath
 import "data/WorldOutline.js" as WorldOutline
 
@@ -47,11 +48,11 @@ Item {
   // must not move the pin that is being scored.
   property bool interactive: true
 
-  property color landColor: Color.popups.background
-  property color landStroke: Color.popups.text
-  property color graticuleColor: Color.popups.text
-  property color guessColor: Color.popups.text
-  property color answerColor: Color.urgent
+  property color landColor: Commons.Color.popups.background
+  property color landStroke: Commons.Color.popups.text
+  property color graticuleColor: Commons.Color.popups.text
+  property color guessColor: Commons.Color.popups.text
+  property color answerColor: Commons.Color.urgent
 
   signal guessPlaced(real latitude, real longitude)
 
@@ -402,8 +403,8 @@ Item {
       SequentialAnimation on scale {
         running: answerPin.visible
         loops: 3
-        NumberAnimation { from: 1; to: 1.5; duration: 320; easing.type: Easing.OutQuad }
-        NumberAnimation { from: 1.5; to: 1; duration: 320; easing.type: Easing.InQuad }
+        NumberAnimation { from: 1; to: 1.5; duration: (Style.duration ? Style.duration(320) : 320); easing.type: Easing.OutQuad }
+        NumberAnimation { from: 1.5; to: 1; duration: (Style.duration ? Style.duration(320) : 320); easing.type: Easing.OutQuad }
       }
     }
   }

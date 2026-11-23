@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Effects
 import qs.Commons
+import qs.Commons as Commons
 import "Sanitise.js" as Sanitise
 
 // The photo half of the board.
@@ -37,8 +38,8 @@ Item {
   property string photoCredit: ""
   property string photoLicence: ""
 
-  property color foreground: Color.popups.text
-  property color background: Color.popups.background
+  property color foreground: Commons.Color.popups.text
+  property color background: Commons.Color.popups.background
 
   readonly property bool ready: image.status === Image.Ready
 

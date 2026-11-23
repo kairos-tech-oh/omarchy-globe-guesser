@@ -490,7 +490,7 @@ Wikimedia publishes no hard anonymous limit for read queries, but
 its [user-agent policy](https://foundation.wikimedia.org/wiki/Policy:User-Agent_policy)
 requires a descriptive User-Agent identifying the application; a stock library
 User-Agent is explicitly not acceptable. This plugin sends
-`omarchy-globe-guesser/1.1.0 (+<repo url>)` on every request and enforces a
+`omarchy-globe-guesser/1.1.1 (+<repo url>)` on every request and enforces a
 minimum 1,000 ms gap, so leaning on **Skip** collapses into queued requests
 rather than a burst.
 

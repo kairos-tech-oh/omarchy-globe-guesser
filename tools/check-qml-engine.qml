@@ -20,6 +20,7 @@
 import QtQuick
 import "../GeoMath.js" as GeoMath
 import "../Sanitise.js" as Sanitise
+import "../RoundLogic.js" as RoundLogic
 import "../data/WorldOutline.js" as WorldOutline
 import "../data/Places.js" as Places
 
@@ -274,9 +275,8 @@ QtObject {
     if (Sanitise.plainOneLine(null, 80) !== "") return fail(49)
 
     // 50: the URL allowlist, which is the only gate between an API response and
-    // curl's argv. Kept in step with the copy in Panel.qml by hand; if that one
-    // changes, this must too.
-    var allowed = /^https:\/\/upload\.wikimedia\.org\/wikipedia\/commons\/[A-Za-z0-9._~:\/?#\[\]@!$&'()*+,;=%-]{1,700}$/
+    // curl's argv.
+    var allowed = RoundLogic.ALLOWED_PHOTO_URL
     if (!allowed.test("https://upload.wikimedia.org/wikipedia/commons/thumb/d/d4/A.jpg/1280px-A.jpg"))
       return fail(50)
     if (allowed.test("https://evil.invalid/wikipedia/commons/x.jpg")) return fail(51)
@@ -286,6 +286,20 @@ QtObject {
       return fail(54)
     if (allowed.test("-https://upload.wikimedia.org/wikipedia/commons/x.jpg")) return fail(55)
     if (allowed.test("https://upload.wikimedia.org/wikipedia/other/x.jpg")) return fail(56)
+
+    var ok = "https://upload.wikimedia.org/wikipedia/commons/thumb/a/ab/Bridge.jpg/1280px-Bridge.jpg"
+    var page = { title: "Charles Bridge <b>", pageimage: "Charles Bridge view.jpg",
+                 thumbnail: { source: ok, width: 1280, height: 853 }, coordinates: [{ lat: 50.0865, lon: 14.4114 }] }
+    var cands = RoundLogic.parseCandidates(JSON.stringify({ query: { pages: [page, null, { title: "Battle of Prague" }] } }), 262144, 60)
+    if (cands.length !== 1 || cands[0].score !== 4) return fail(60)
+    if (cands[0].title.indexOf("<") >= 0) return fail(61)
+    if (RoundLogic.safeFileName("Pont de l'Alma.jpg") !== "Pont de l'Alma.jpg" || RoundLogic.safeFileName("a\nb") !== "") return fail(62)
+    if (RoundLogic.clampRadius(50000, 10000) !== 10000 || RoundLogic.clampRadius(3, 10000) !== 10) return fail(63)
+    var cmd = RoundLogic.cappedCurl("https://en.wikipedia.org/", 10, 0, "ua")
+    if (cmd[cmd.indexOf("--max-time") + 1] !== "1" || cmd[3] !== "6") return fail(64)
+    if (cmd[cmd.indexOf("--proto") + 1] !== "=https") return fail(66)
+    var pick = RoundLogic.chooseCandidate([{ score: 4, id: "a" }, { score: 1, id: "c" }], Math.random)
+    if (pick.id !== "a") return fail(65)
 
     Qt.exit(0)
   }
